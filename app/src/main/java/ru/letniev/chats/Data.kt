@@ -1,17 +1,5 @@
 package ru.letniev.chats
 
-import androidx.compose.ui.graphics.Color
-
-val Primary = Color(0xFF8F5FE8)
-val Surface = Color(0xFFFDFBFF)
-val NavBg = Color(0xFFF8F5FC)
-val Text1 = Color(0xFF1C1B22)
-val Text2 = Color(0xFF6F6A7A)
-val Mute = Color(0xFFC4BECF)
-val Divider = Color(0xFFE4E1EA)
-val Green = Color(0xFF2BC016)
-val HeaderGray = Color(0xFFB4AEBF)   // серый шапки: кнопка архива
-
 class Chat(
     val name: String, val init: String, val g1: Long, val g2: Long, val text: String, val time: String,
     val photo: String, val sender: String? = null, val badge: String? = null, val orange: Boolean = false,
