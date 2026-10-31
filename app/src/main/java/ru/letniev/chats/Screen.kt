@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -62,13 +64,12 @@ private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, 
 fun ChatsScreen() {
     val ctx = LocalContext.current
     var tab by remember { mutableIntStateOf(0) }
-    val list = when (tab) { 1 -> chats.filter { it.badge != null }; 2 -> chats.filter { it.shared }; else -> chats }
+    val list = when (tab) { 1 -> chats.filter { it.badge != null }; 2 -> chats.filter { it.shared }; 3 -> queueChats; else -> chats }
     val ff = remember { loadFont(ctx) }
     CompositionLocalProvider(LocalFF provides ff) { Column(Modifier.fillMaxSize().background(Surface)) {
         Column(Modifier.statusBarsPadding()) { TopBar(); Tabs(tab) { tab = it } }
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             items(list) { ChatRow(it) }
-            if (tab == 0) item { Queue() }
             item { Spacer(Modifier.height(16.dp)) }
         }
         NavBar()
@@ -98,12 +99,13 @@ private fun TopBar() {
 
 @Composable
 private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
-    val names = listOf("Все", "Непрочитанные", "Общие")
-    val xs = remember { mutableStateListOf(0f, 0f, 0f) }
-    val ws = remember { mutableStateListOf(0f, 0f, 0f) }
+    val names = listOf("все", "непрочитанные", "общие", "можно взять")
+    val xs = remember { mutableStateListOf(0f, 0f, 0f, 0f) }
+    val ws = remember { mutableStateListOf(0f, 0f, 0f, 0f) }
     val x by animateFloatAsState(xs[sel], tween(320), label = "x")
     val w by animateFloatAsState(ws[sel], tween(320), label = "w")
-    Box(Modifier.padding(horizontal = 16.dp).padding(top = 8.dp).fillMaxWidth().height(48.dp)) {
+    Box(Modifier.padding(top = 8.dp).fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState())) {
+      Box(Modifier.padding(horizontal = 16.dp).height(48.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
             names.forEachIndexed { i, n ->
                 val on = i == sel
@@ -128,6 +130,7 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
                 .width(with(LocalDensity.current) { w.toDp() }).height(3.dp)
                 .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)).background(Primary)
         )
+      }
     }
 }
 
@@ -150,10 +153,6 @@ private fun ChatRow(c: Chat) {
     ) {
         Box(Modifier.padding(top = 10.dp).size(60.dp)) {
             Avatar(c.init, 60, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
-            if (c.online) Box(
-                Modifier.align(Alignment.BottomEnd).offset(1.dp, 0.dp).size(17.dp).background(Color.White, CircleShape).padding(2.dp)
-                    .background(Green, CircleShape)
-            )
         }
         Box(Modifier.weight(1f).fillMaxHeight().padding(top = 9.dp, end = 16.dp)) {
             Column {
@@ -186,23 +185,8 @@ private fun ChatRow(c: Chat) {
 }
 
 @Composable
-private fun Queue() {
-    Column(Modifier.padding(top = 6.dp, bottom = 12.dp)) {
-        T("можно взять", ts(13, 18, 400, .1f, Text2), Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp))
-        LazyRow(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(queue) { q ->
-                Column(Modifier.width(56.dp), Arrangement.spacedBy(4.dp), Alignment.CenterHorizontally) {
-                    Avatar(q.init, 52, 18, q.photo, Brush.linearGradient(listOf(Color(q.color), Color(q.color))))
-                    T(q.name, ts(11, 14, 500, .2f, Text1), align = TextAlign.Center)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun NavBar() {
-    Row(Modifier.fillMaxWidth().background(NavBg).padding(horizontal = 8.dp).padding(top = 8.dp, bottom = 8.dp).navigationBarsPadding()) {
+    Row(Modifier.fillMaxWidth().background(NavBg).padding(horizontal = 8.dp).padding(top = 8.dp, bottom = 14.dp).navigationBarsPadding()) {
         NavItem("Стена", false) { VIcon(BELL_O, Text2, 28.dp, evenOdd = true) }
         NavItem("Чаты", true) { VIcon(CHAT, Primary, 28.dp) }
         NavItem("Профиль", false) {
