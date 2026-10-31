@@ -1,6 +1,7 @@
 package ru.letniev.chats
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
@@ -43,6 +44,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.exp
+import kotlin.math.sin
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -83,6 +85,7 @@ private fun loadFont(c: Context): FontFamily = try {
 private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, align: TextAlign? = null) =
     BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
+private val StickEasing = CubicBezierEasing(.3f, 0f, .2f, 1.12f)
 private const val BAR = 76      // высота строки с заголовком, dp
 private const val STORIES = 104  // высота очереди в развёрнутом виде, dp
 
@@ -184,14 +187,10 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
     val canScroll by remember(hs) { derivedStateOf { hs.p < .3f } }
     val drag = rememberDraggableState { d -> hs.drag(-d) }
     val ease = { t: Float -> FastOutSlowInEasing.transform(t.coerceIn(0f, 1f)) }
+    val stick = { t: Float -> StickEasing.transform(t.coerceIn(0f, 1f)) }
     BoxWithConstraints(Modifier.fillMaxWidth().background(Surface).draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.release(v) })) {
         Column {
             Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
-                // архив гаснет, когда на его место прилетает очередь
-                Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp).graphicsLayer {
-                    val k = ease((hs.p - .35f) / .3f)
-                    alpha = 1f - k; scaleX = 1f - .2f * k; scaleY = 1f - .2f * k
-                }) { IconBox { VIcon(ARCHIVE, Primary, 28.dp, stroke = 1.5f) } }
                 Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, Primary, 28.dp, evenOdd = true) } }
                 Row(Modifier.align(Alignment.Center), Arrangement.spacedBy(12.dp), Alignment.CenterVertically) {
                     T("Общение", ts(20, 28, 500, 0f, Color.Black))
@@ -226,23 +225,26 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
             }
         }
 
-        // аватары: летят по дуге (вверх быстрее, влево чуть позже), с задержкой друг за другом
+        // аватары: стопка из первых трёх; остальные заезжают под третью и выезжают из-под неё.
+        // Лёгкая «липкость»: в полёте аватарки чуть вытягиваются, у разворота слегка пружинят
         queueChats.forEachIndexed { i, c ->
             Box(
                 Modifier
                     .graphicsLayer {
                         val p = hs.p
                         val pi = (p * 1.5f - i * .08f).coerceIn(0f, 1f)
-                        val xe = ease(pi)
+                        val xe = stick(pi)
                         val ye = ease(pi * 1.35f)
-                        val x0 = (16 + i * 72) * u - ss.value * (1 - xe)
+                        val x0 = (16 + i * 72) * u - ss.value * (1 - ease(pi))
                         val x1 = (12 + minOf(i, 2) * 16) * u
                         translationX = x0 + (x1 - x0) * xe
                         translationY = ((BAR + 4) + ((BAR - 46) - (BAR + 4)) * ye) * u
-                        val s = 1f - .5f * xe
-                        scaleX = s; scaleY = s
+                        val s = 1f - .5f * ease(pi)
+                        val mid = sin(pi * 3.1416f)
+                        scaleX = s * (1f + .10f * mid); scaleY = s * (1f - .06f * mid)
                         transformOrigin = TransformOrigin(0f, 0f)
-                        alpha = if (i < 3) 1f else 1f - ((pi - .35f) / .4f).coerceIn(0f, 1f)
+                        // четвёртая и далее спрятаны под третьей; гаснут только в самом конце, чтобы не было каёмки
+                        alpha = if (i < 3) 1f else 1f - ((pi - .85f) / .15f).coerceIn(0f, 1f)
                     }
                     .zIndex((n - i).toFloat())
                     .size(56.dp)
@@ -254,7 +256,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
             Spacer(Modifier.width((16 + n * 72 - 8 + 16).dp).height(1.dp))
         }
 
-        // тап по стопке на месте архива возвращает очередь
+        // тап по стопке аватаров возвращает очередь
         if (showHit) Box(
             Modifier.size(84.dp, BAR.dp)
                 .clickable(remember { MutableInteractionSource() }, null) { hs.flip(false) }
