@@ -10,7 +10,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -37,6 +40,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
@@ -117,36 +122,40 @@ private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, 
 private const val STORIES = 104  // высота ряда очереди, dp
 
 // ───────── резинка вместо андроидовского оверскролла ─────────
-// Тянешь за край списка: он идёт за пальцем, но с нарастающим сопротивлением (чем дальше, тем туже).
-// Отпустил: плавно возвращается без отскока. Так же небольшой толчок, если список долетел до края с разгона.
+// Тянешь за край: содержимое идёт за пальцем, но туго, и чем дальше, тем сильнее сопротивление.
+// Отпустил: плавно возвращается без отскока. Работает по вертикали (список) и по горизонтали (ряд очереди).
 @Stable
-private class Rubber(private val scope: CoroutineScope, u: Float) : NestedScrollConnection {
+private class Rubber(private val scope: CoroutineScope, u: Float, private val horizontal: Boolean = false) : NestedScrollConnection {
     private var raw by mutableFloatStateOf(0f)   // сколько реально протянул палец, px
     private var job: Job? = null
-    private val limit = 120f * u                 // дальше этого списка не уехать никогда
-    private val grip = .6f                       // «вязкость» в самом начале: 1 = без сопротивления
+    private val limit = 56f * u                  // дальше этого не уедет никогда
+    private val grip = .3f                       // сопротивление в самом начале: 1 = без сопротивления
 
     val offset: Float get() = if (raw == 0f) 0f else sign(raw) * limit * (1f - exp(-abs(raw) * grip / limit))
 
+    private fun Offset.a() = if (horizontal) x else y
+    private fun Velocity.a() = if (horizontal) x else y
+    private fun off(v: Float) = if (horizontal) Offset(v, 0f) else Offset(0f, v)
+
     private fun springBack(v: Float = 0f, from: Float = raw) {
         job?.cancel()
-        job = scope.launch { animate(from, 0f, v, spring(1f, 200f)) { x, _ -> raw = x } }
+        job = scope.launch { animate(from, 0f, v, spring(1f, 220f)) { x, _ -> raw = x } }
     }
 
     override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
         if (source != NestedScrollSource.UserInput || raw == 0f) return Offset.Zero
         job?.cancel()
-        val n = raw + available.y
-        return if (raw * n <= 0f) { // палец вернулся за исходную точку: забираем ровно столько, сколько нужно до нуля
-            val c = -raw; raw = 0f; Offset(0f, c)
-        } else { raw = n; Offset(0f, available.y) }
+        val n = raw + available.a()
+        return if (raw * n <= 0f) { // палец вернулся за исходную точку: забираем ровно до нуля
+            val c = -raw; raw = 0f; off(c)
+        } else { raw = n; off(available.a()) }
     }
 
     override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-        if (source != NestedScrollSource.UserInput || available.y == 0f) return Offset.Zero
+        if (source != NestedScrollSource.UserInput || available.a() == 0f) return Offset.Zero
         job?.cancel()
-        raw += available.y
-        return Offset(0f, available.y)
+        raw += available.a()
+        return off(available.a())
     }
 
     override suspend fun onPreFling(available: Velocity): Velocity {
@@ -156,9 +165,48 @@ private class Rubber(private val scope: CoroutineScope, u: Float) : NestedScroll
     }
 
     override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
-        if (available.y != 0f && raw == 0f) springBack(available.y * .3f, 0f)
+        if (available.a() != 0f && raw == 0f) springBack(available.a() * .2f, 0f)
         return Velocity.Zero
     }
+}
+
+// ───────── сворачивание очереди ─────────
+// Без хитростей: высота ряда очереди ровно следует за пальцем (1:1), без порогов и рывков.
+// Отпустил на полпути: пружиной доезжает до ближайшего положения (по броску: туда, куда бросил).
+@Stable
+private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) : NestedScrollConnection {
+    var collapsed by mutableFloatStateOf(0f)
+    val p: Float get() = if (maxPx > 0f) (collapsed / maxPx).coerceIn(0f, 1f) else 0f
+    private var job: Job? = null
+
+    // d > 0 сворачивает, d < 0 раскрывает; возвращает, сколько реально сдвинулось
+    fun by(d: Float): Float {
+        job?.cancel()
+        val n = (collapsed + d).coerceIn(0f, maxPx)
+        val used = n - collapsed
+        collapsed = n
+        return used
+    }
+
+    fun settle(vy: Float) { // vy: скорость пальца, вверх отрицательно
+        if (collapsed <= 0f || collapsed >= maxPx) return
+        val target = when { vy < -700f -> maxPx; vy > 700f -> 0f; p > .5f -> maxPx; else -> 0f }
+        job?.cancel()
+        job = scope.launch { animate(collapsed, target, -vy.coerceIn(-4000f, 4000f), spring(1f, 300f)) { x, _ -> collapsed = x.coerceIn(0f, maxPx) } }
+    }
+
+    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+        val dy = available.y
+        return if (dy < 0f && collapsed < maxPx) Offset(0f, -by(-dy)) else Offset.Zero
+    }
+
+    // список уже у верха, палец тянет вниз дальше: раскрываем очередь
+    override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+        val dy = available.y
+        return if (source == NestedScrollSource.UserInput && dy > 0f && collapsed > 0f) Offset(0f, -by(-dy)) else Offset.Zero
+    }
+
+    override suspend fun onPreFling(available: Velocity): Velocity { settle(available.y); return Velocity.Zero }
 }
 
 // ───────── экран ─────────
@@ -173,6 +221,7 @@ fun ChatsScreen(dark: Boolean, onToggleTheme: () -> Unit) {
     val u = LocalDensity.current.density
     val scope = rememberCoroutineScope()
     val rubber = remember(u) { Rubber(scope, u) }
+    val hs = remember(u) { HeaderState(STORIES * u, scope) }
     val t by animateFloatAsState(if (dark) 1f else 0f, tween(350), label = "theme")
     val pal = mix(t)
     val toggle by rememberUpdatedState(onToggleTheme)
@@ -184,8 +233,9 @@ fun ChatsScreen(dark: Boolean, onToggleTheme: () -> Unit) {
                 // удержание на пустом месте (на строках чатов и кнопках не срабатывает: они забирают нажатие себе)
                 .pointerInput(Unit) { detectTapGestures(onLongPress = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); toggle() }) }
                 .nestedScroll(rubber)
+                .nestedScroll(hs)
         ) {
-            Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }) { toggle() } }
+            Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }, hs) { toggle() } }
             Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
                 LazyColumn(Modifier.fillMaxSize().graphicsLayer { translationY = rubber.offset }) {
                     items(list) { ChatRow(it) }
@@ -206,35 +256,56 @@ private fun IconBox(onClick: (() -> Unit)? = null, content: @Composable () -> Un
     ) { content() }
 }
 
-// шапка: архив слева, заголовок по центру, поиск справа, ряд очереди и вкладки; ничего не сворачивается
+// шапка: архив слева, заголовок по центру, поиск справа, ряд очереди и вкладки.
+// Очередь сворачивается вместе с прокруткой списка; шапку можно двигать и пальцем за неё саму.
 @Composable
-private fun Header(tab: Int, onTab: (Int) -> Unit, onArchive: () -> Unit) {
+private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState, onArchive: () -> Unit) {
     val pal = LocalPal.current
-    Column(Modifier.fillMaxWidth()) {
+    val drag = rememberDraggableState { d -> hs.by(-d) }
+    Column(Modifier.fillMaxWidth().draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.settle(v) })) {
         Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
             Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { IconBox(onArchive) { VIcon(ARCHIVE, pal.headerGray, 28.dp, stroke = 1.7f) } }
             Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, pal.primary, 28.dp, stroke = 2f) } }
             Box(Modifier.align(Alignment.Center)) { T("Общение", ts(20, 28, 500, 0f, pal.title)) }
         }
-        Stories()
+        Stories(hs)
         Tabs(tab, onTab)
     }
 }
 
-// очередь «можно взять»: аватарка, имя, время ожидания
+// очередь «можно взять»: аватарка, имя, время ожидания; по горизонтали с резинкой на краях
 @Composable
-private fun Stories() {
+private fun Stories(hs: HeaderState) {
     val pal = LocalPal.current
-    Row(
-        Modifier.fillMaxWidth().height(STORIES.dp).horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    val u = LocalDensity.current.density
+    val scope = rememberCoroutineScope()
+    val rubber = remember(u) { Rubber(scope, u, horizontal = true) }
+    Box(
+        Modifier.fillMaxWidth()
+            .layout { m, c ->
+                val h = (hs.maxPx - hs.collapsed).roundToInt().coerceAtLeast(0)
+                val pl = m.measure(c.copy(minHeight = 0, maxHeight = Constraints.Infinity))
+                layout(pl.width, h) { pl.place(0, 0) }
+            }
+            .clipToBounds().nestedScroll(rubber)
     ) {
-        queueChats.forEachIndexed { i, c ->
-            Column(Modifier.width(64.dp).padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
-                Spacer(Modifier.height(6.dp))
-                T(c.name, ts(13, 16, 500, 0f, pal.text1))
-                T(c.time, ts(12, 16, 500, 0f, if (i < 2) pal.primary else pal.text2))
+        Row(
+            Modifier.fillMaxWidth().height(STORIES.dp)
+                .graphicsLayer {
+                    translationX = rubber.offset
+                    translationY = -hs.collapsed * .35f
+                    alpha = (1f - hs.p * 1.25f).coerceIn(0f, 1f)
+                }
+                .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            queueChats.forEachIndexed { i, c ->
+                Column(Modifier.width(64.dp).padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
+                    Spacer(Modifier.height(6.dp))
+                    T(c.name, ts(13, 16, 500, 0f, pal.text1))
+                    T(c.time, ts(12, 16, 500, 0f, if (i < 2) pal.primary else pal.text2))
+                }
             }
         }
     }
