@@ -11,6 +11,12 @@ jobs:
         with: {distribution: temurin, java-version: 17}
       - uses: gradle/actions/setup-gradle@v4
         with: {gradle-version: "8.9"}
+      - name: Шрифт Roboto
+        run: |
+          mkdir -p app/src/main/assets/fonts
+          curl -fsSL https://github.com/googlefonts/roboto/releases/download/v2.138/roboto-unhinted.zip -o r.zip \
+            && unzip -j -o r.zip '*Roboto-Regular.ttf' '*Roboto-Medium.ttf' -d app/src/main/assets/fonts \
+            || echo "Roboto не скачался, будет системный шрифт"
       - name: Build release (подпись релизным ключом app/release.jks)
         run: gradle assembleRelease --no-daemon
       - uses: actions/upload-artifact@v4

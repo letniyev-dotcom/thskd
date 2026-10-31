@@ -23,6 +23,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalDensity
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
@@ -39,15 +43,28 @@ private fun ts(size: Int, lh: Int, w: Int, ls: Float, c: Color) = TextStyle(
     lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None)
 )
 
+private val LocalFF = staticCompositionLocalOf<FontFamily> { FontFamily.Default }
+
+// Roboto подкладывает сборка (см. workflow); если файлов нет, берём системный шрифт
+private fun loadFont(c: Context): FontFamily = try {
+    val a = c.assets
+    val l = a.list("fonts")?.toList().orEmpty()
+    if ("Roboto-Regular.ttf" in l && "Roboto-Medium.ttf" in l)
+        FontFamily(Font("fonts/Roboto-Regular.ttf", a, FontWeight.Normal), Font("fonts/Roboto-Medium.ttf", a, FontWeight.Medium))
+    else FontFamily.Default
+} catch (e: Exception) { FontFamily.Default }
+
 @Composable
 private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, align: TextAlign? = null) =
-    BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified), maxLines = lines, overflow = TextOverflow.Ellipsis)
+    BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
 @Composable
 fun ChatsScreen() {
+    val ctx = LocalContext.current
     var tab by remember { mutableIntStateOf(0) }
     val list = when (tab) { 1 -> chats.filter { it.badge != null }; 2 -> chats.filter { it.shared }; else -> chats }
-    Column(Modifier.fillMaxSize().background(Surface)) {
+    val ff = remember { loadFont(ctx) }
+    CompositionLocalProvider(LocalFF provides ff) { Column(Modifier.fillMaxSize().background(Surface)) {
         Column(Modifier.statusBarsPadding()) { TopBar(); Tabs(tab) { tab = it } }
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             items(list) { ChatRow(it) }
@@ -55,7 +72,7 @@ fun ChatsScreen() {
             item { Spacer(Modifier.height(16.dp)) }
         }
         NavBar()
-    }
+    } }
 }
 
 @Composable
@@ -127,22 +144,22 @@ private fun ChatRow(c: Chat) {
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
     Row(
-        Modifier.fillMaxWidth().height(92.dp).background(if (pressed) Primary.copy(alpha = .09f) else Color.Transparent)
+        Modifier.fillMaxWidth().height(80.dp).background(if (pressed) Primary.copy(alpha = .09f) else Color.Transparent)
             .clickable(src, null) {}.padding(start = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Box(Modifier.padding(top = 12.dp).size(68.dp)) {
-            Avatar(c.init, 68, 22, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
+        Box(Modifier.padding(top = 10.dp).size(60.dp)) {
+            Avatar(c.init, 60, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
             if (c.online) Box(
                 Modifier.align(Alignment.BottomEnd).offset(1.dp, 0.dp).size(17.dp).background(Color.White, CircleShape).padding(2.dp)
                     .background(Green, CircleShape)
             )
         }
-        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 12.dp, end = 16.dp)) {
+        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 9.dp, end = 16.dp)) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f), Arrangement.spacedBy(6.dp), Alignment.CenterVertically) {
-                        T(c.name, ts(17, 24, 500, 0f, Text1), Modifier.weight(1f, fill = false))
+                        T(c.name, ts(17, 22, 500, 0f, Text1), Modifier.weight(1f, fill = false))
                         if (c.muted) Box {
                             VIcon(SPEAKER, Mute, 17.dp)
                             VIcon(CROSS, Mute, 17.dp, stroke = 1.6f)
@@ -151,7 +168,7 @@ private fun ChatRow(c: Chat) {
                     Spacer(Modifier.width(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                         if (c.check) VIcon(CHECK, Primary, 18.dp)
-                        T(c.time, ts(13, 24, 400, 0f, Text2))
+                        T(c.time, ts(13, 22, 400, 0f, Text2))
                     }
                 }
                 Column(Modifier.padding(top = 2.dp, end = if (c.badge != null) 34.dp else 0.dp).height(40.dp)) {
@@ -160,7 +177,7 @@ private fun ChatRow(c: Chat) {
                 }
             }
             if (c.badge != null) Box(
-                Modifier.align(Alignment.TopEnd).padding(top = 44.dp).defaultMinSize(22.dp).height(22.dp)
+                Modifier.align(Alignment.TopEnd).padding(top = 39.dp).defaultMinSize(22.dp).height(22.dp)
                     .clip(RoundedCornerShape(11.dp)).background(if (c.orange) Primary else Mute).padding(horizontal = 6.dp),
                 Alignment.Center
             ) { T(c.badge, ts(13, 18, 500, 0f, if (c.orange) Color.White else Surface)) }
