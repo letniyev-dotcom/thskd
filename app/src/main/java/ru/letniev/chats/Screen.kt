@@ -42,6 +42,7 @@ import androidx.compose.ui.zIndex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlin.math.exp
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -85,16 +86,47 @@ private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, 
 private const val BAR = 76      // высота строки с заголовком, dp
 private const val STORIES = 104  // высота очереди в развёрнутом виде, dp
 
-// состояние сворачивания шапки: 0 = очередь развёрнута, maxPx = свёрнута в кластер у заголовка
+// состояние шапки: два положения (очередь развёрнута / свёрнута).
+// Палец сначала лишь слегка тянет шапку (резинка), после порога она сама доезжает до другого положения.
 @Stable
 private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) {
     var collapsed by mutableFloatStateOf(0f)
     val p: Float get() = if (maxPx > 0f) (collapsed / maxPx).coerceIn(0f, 1f) else 0f
+    var isCollapsed = false
+        private set
+    var pull = 0f
+        private set
     private var job: Job? = null
-    fun stop() { job?.cancel(); job = null }
-    fun drag(d: Float): Float { stop(); val n = (collapsed + d).coerceIn(0f, maxPx); val used = n - collapsed; collapsed = n; return used }
-    fun animateTo(t: Float) { stop(); job = scope.launch { animate(collapsed, t, animationSpec = tween(320)) { v, _ -> collapsed = v } } }
-    fun settle() = animateTo(if (collapsed > maxPx / 2) maxPx else 0f)
+    private val threshold = maxPx * .16f
+    private val reach = maxPx * .25f
+    private val busy get() = job?.isActive == true
+
+    private fun rubber(x: Float) = reach * (1f - exp(-x / reach))
+    private fun show() { collapsed = if (isCollapsed) maxPx - rubber(pull) else rubber(pull) }
+
+    fun animateTo(t: Float, ms: Int = 420) {
+        job?.cancel()
+        job = scope.launch { animate(collapsed, t, animationSpec = tween(ms)) { v, _ -> collapsed = v } }
+    }
+    fun flip(to: Boolean) { isCollapsed = to; pull = 0f; animateTo(if (to) maxPx else 0f) }
+
+    // d > 0: тянем в сторону сворачивания. Возвращает, сколько движения забрала шапка (остальное уйдёт списку)
+    fun drag(d: Float): Float {
+        if (busy) return d
+        val away = if (isCollapsed) -d else d
+        if (pull == 0f && away <= 0f) return 0f
+        pull = (pull + away).coerceAtLeast(0f)
+        if (pull >= threshold) { flip(!isCollapsed); return d }
+        show()
+        return d
+    }
+
+    // палец отпущен: быстрый бросок доводит переход, иначе шапка возвращается назад
+    fun release(vy: Float) {
+        if (busy) return
+        val flick = pull > 0f && ((!isCollapsed && vy < -700f) || (isCollapsed && vy > 700f))
+        if (flick) flip(!isCollapsed) else if (pull > 0f) { pull = 0f; animateTo(if (isCollapsed) maxPx else 0f, 260) }
+    }
 }
 
 private fun Modifier.storiesHeight(hs: HeaderState) = layout { m, c ->
@@ -114,19 +146,18 @@ fun ChatsScreen() {
     val hs = remember(u) { HeaderState(STORIES * u, scope) }
     val conn = remember(hs) {
         object : NestedScrollConnection {
-            // свайп вверх: сначала сворачиваем очередь, потом едет список
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 val dy = available.y
-                if (dy < 0f && hs.collapsed < hs.maxPx) return Offset(0f, -hs.drag(-dy))
+                if (hs.pull > 0f || (dy < 0f && !hs.isCollapsed)) return Offset(0f, -hs.drag(-dy))
                 return Offset.Zero
             }
-            // свайп вниз: список доезжает до верха, остаток разворачивает очередь
+            // список уже у верха, а палец тянет вниз дальше: тянем очередь
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                 val dy = available.y
-                if (dy > 0f && hs.collapsed > 0f) return Offset(0f, -hs.drag(-dy))
+                if (dy > 0f && hs.isCollapsed) return Offset(0f, -hs.drag(-dy))
                 return Offset.Zero
             }
-            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity { hs.settle(); return Velocity.Zero }
+            override suspend fun onPreFling(available: Velocity): Velocity { hs.release(available.y); return Velocity.Zero }
         }
     }
     CompositionLocalProvider(LocalFF provides ff) { Column(Modifier.fillMaxSize().background(Surface).nestedScroll(conn)) {
@@ -153,7 +184,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
     val canScroll by remember(hs) { derivedStateOf { hs.p < .3f } }
     val drag = rememberDraggableState { d -> hs.drag(-d) }
     val ease = { t: Float -> FastOutSlowInEasing.transform(t.coerceIn(0f, 1f)) }
-    BoxWithConstraints(Modifier.fillMaxWidth().background(Surface).draggable(drag, Orientation.Vertical, onDragStopped = { hs.settle() })) {
+    BoxWithConstraints(Modifier.fillMaxWidth().background(Surface).draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.release(v) })) {
         Column {
             Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
                 // архив гаснет, когда на его место прилетает очередь
@@ -226,7 +257,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
         // тап по стопке на месте архива возвращает очередь
         if (showHit) Box(
             Modifier.size(84.dp, BAR.dp)
-                .clickable(remember { MutableInteractionSource() }, null) { hs.animateTo(0f) }
+                .clickable(remember { MutableInteractionSource() }, null) { hs.flip(false) }
         )
     }
 }
