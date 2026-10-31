@@ -85,6 +85,8 @@ private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, 
 
 private const val BAR = 76      // высота строки с заголовком, dp
 private const val STORIES = 104  // высота очереди в развёрнутом виде, dp
+private const val STACK_W = 60   // ширина стопки из трёх аватарок в свёрнутом виде, dp
+private const val STACK_GAP = 10 // зазор между стопкой и заголовком, dp
 
 // состояние шапки: два положения (очередь развёрнута / свёрнута).
 // Шапка идёт за пальцем всё время: сначала с сопротивлением, дальше почти 1:1; после отпускания доезжает пружиной,
@@ -199,7 +201,7 @@ fun ChatsScreen() {
 private fun IconBox(content: @Composable () -> Unit) =
     Box(Modifier.size(48.dp), Alignment.Center) { content() }
 
-// шапка: заголовок, очередь «сторис» и вкладки; при сворачивании очередь улетает на место кнопки архива
+// шапка: архив слева, заголовок по центру, поиск справа, очередь «сторис» и вкладки; при сворачивании очередь становится стопкой слева от заголовка
 @Composable
 private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
     val u = LocalDensity.current.density
@@ -209,17 +211,16 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
     val canScroll by remember(hs) { derivedStateOf { hs.p < .3f } }
     val drag = rememberDraggableState { d -> hs.drag(-d) }
     BoxWithConstraints(Modifier.fillMaxWidth().background(Surface).draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.release(v) })) {
+        var titlePx by remember { mutableIntStateOf(0) }
+        val stackPx = (STACK_W + STACK_GAP) * u
+        val groupLeft = (constraints.maxWidth - stackPx - titlePx) / 2f  // левый край группы «стопка + заголовок»
         Column {
             Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
-                Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, Primary, 28.dp, evenOdd = true) } }
-                Row(Modifier.align(Alignment.Center), Arrangement.spacedBy(12.dp), Alignment.CenterVertically) {
-                    T("Общение", ts(20, 28, 500, 0f, Color.Black))
-                    Box(Modifier.width(1.dp).height(24.dp).background(Text1.copy(alpha = .14f)))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        val c = Color(0xFFB6AEAA)
-                        VIcon(TG, c, 24.dp, 20.dp, vx = 3.5f, vy = 6f, vw = 15f, vh = 13f)
-                        T("ТГ", ts(20, 28, 500, 0f, c))
-                    }
+                Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { IconBox { VIcon(ARCHIVE, HeaderGray, 28.dp, stroke = 1.7f) } }
+                Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, Primary, 28.dp, stroke = 2f) } }
+                // заголовок по центру; когда очередь свёрнута, стопка встаёт слева от него и они вместе стоят по центру
+                Box(Modifier.align(Alignment.Center).graphicsLayer { translationX = hs.p * stackPx / 2f }) {
+                    T("Общение", ts(20, 28, 500, 0f, Color.Black), Modifier.onSizeChanged { titlePx = it.width })
                 }
             }
             Spacer(Modifier.fillMaxWidth().storiesHeight(hs))
@@ -229,17 +230,19 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
         // всё завязано на один прогресс p: шапка, вкладки, список, аватарки и подписи двигаются вместе
         Box(Modifier.offset(y = BAR.dp).fillMaxWidth().height(0.dp).wrapContentHeight(Alignment.Top, unbounded = true)) {
             queueChats.forEachIndexed { i, c ->
-                Column(
+                Box(
                     Modifier.padding(top = 64.dp).width(64.dp).graphicsLayer {
                         val p = hs.p
                         translationX = (16 + i * 72) * u - ss.value * (1 - p) - 4 * u
                         translationY = -50f * u * p
                         alpha = 1f - (p / .3f).coerceIn(0f, 1f)
                     },
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    Alignment.TopCenter
                 ) {
-                    T(c.name, ts(12, 16, 500, 0f, Text1))
-                    T(c.time, ts(11, 16, 400, 0f, if (i < 2) Primary else Text2))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        T(c.name, ts(12, 16, 500, 0f, Text1))
+                        T(c.time, ts(11, 16, 400, 0f, if (i < 2) Primary else Text2))
+                    }
                 }
             }
         }
@@ -251,7 +254,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
                     .graphicsLayer {
                         val p = hs.p
                         val x0 = (16 + i * 72) * u - ss.value * (1 - p)
-                        val x1 = (12 + minOf(i, 2) * 16) * u
+                        val x1 = groupLeft + minOf(i, 2) * 16 * u
                         translationX = x0 + (x1 - x0) * p
                         translationY = ((BAR + 4) + ((BAR - 46) - (BAR + 4)) * p) * u
                         val s = 1f - .5f * p
@@ -266,7 +269,9 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
                         val ra = ((hs.p - .6f) / .4f).coerceIn(0f, 1f)
                         if (ra > 0f) drawCircle(Surface.copy(alpha = ra), size.minDimension / 2 + 3.dp.toPx())
                     }
-            ) { Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2)))) }
+            ) {
+                Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
+            }
         }
 
         if (canScroll) Box(Modifier.offset(y = BAR.dp).fillMaxWidth().storiesHeight(hs).horizontalScroll(ss)) {
@@ -275,7 +280,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
 
         // тап по стопке аватаров возвращает очередь
         if (showHit) Box(
-            Modifier.size(84.dp, BAR.dp)
+            Modifier.offset { IntOffset(groupLeft.roundToInt(), 0) }.size((STACK_W + 8).dp, BAR.dp)
                 .clickable(remember { MutableInteractionSource() }, null) { hs.flip(false, 300f) }
         )
     }
@@ -290,17 +295,24 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
     val w by animateFloatAsState(ws[sel], tween(320), label = "w")
     Box(Modifier.padding(top = 8.dp).fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState())) {
       Box(Modifier.padding(horizontal = 16.dp).height(48.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+        // пилюля выбранной папки: едет под текстом от вкладки к вкладке
+        Box(
+            Modifier.offset { IntOffset(x.roundToInt(), 0) }.align(Alignment.CenterStart)
+                .width(with(LocalDensity.current) { w.toDp() }).height(34.dp)
+                .clip(RoundedCornerShape(17.dp)).background(Primary.copy(alpha = .13f))
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             names.forEachIndexed { i, n ->
                 val on = i == sel
                 val col by animateColorAsState(if (on) Primary else Text2, label = "c")
                 Row(
                     Modifier.height(48.dp)
                         .onGloballyPositioned { xs[i] = it.positionInParent().x; ws[i] = it.size.width.toFloat() }
-                        .clickable(remember { MutableInteractionSource() }, null) { onSel(i) },
+                        .clickable(remember { MutableInteractionSource() }, null) { onSel(i) }
+                        .padding(horizontal = 18.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
                 ) {
-                    T(n, ts(16, 24, 500, .15f, col))
+                    T(n, ts(16, 24, 500, .1f, col))
                     if (i == 0) Box(
                         Modifier.defaultMinSize(20.dp).height(20.dp).clip(RoundedCornerShape(10.dp))
                             .background(if (on) Primary else Mute).padding(horizontal = 6.dp),
@@ -309,11 +321,6 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
                 }
             }
         }
-        Box(
-            Modifier.offset { IntOffset(x.roundToInt(), 0) }.align(Alignment.BottomStart)
-                .width(with(LocalDensity.current) { w.toDp() }).height(3.dp)
-                .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)).background(Primary)
-        )
       }
     }
 }
@@ -331,36 +338,36 @@ private fun ChatRow(c: Chat) {
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
     Row(
-        Modifier.fillMaxWidth().height(80.dp).background(if (pressed) Primary.copy(alpha = .09f) else Color.Transparent)
-            .clickable(src, null) {}.padding(start = 16.dp),
+        Modifier.fillMaxWidth().height(92.dp).background(if (pressed) Primary.copy(alpha = .09f) else Color.Transparent)
+            .clickable(src, null) {}.padding(start = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Box(Modifier.padding(top = 10.dp).size(60.dp)) {
-            Avatar(c.init, 60, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
+        Box(Modifier.padding(top = 18.dp).size(56.dp)) {
+            Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
         }
-        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 9.dp, end = 16.dp)) {
+        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 22.dp, end = 16.dp)) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f), Arrangement.spacedBy(6.dp), Alignment.CenterVertically) {
-                        T(c.name, ts(17, 22, 500, 0f, Text1), Modifier.weight(1f, fill = false))
+                        T(c.name, ts(18, 24, 500, 0f, Text1), Modifier.weight(1f, fill = false))
                         if (c.muted) Box {
-                            VIcon(SPEAKER, Mute, 17.dp)
-                            VIcon(CROSS, Mute, 17.dp, stroke = 1.6f)
+                            VIcon(SPEAKER, Mute, 18.dp)
+                            VIcon(CROSS, Mute, 18.dp, stroke = 1.6f)
                         }
                     }
                     Spacer(Modifier.width(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                         if (c.check) VIcon(CHECK, Primary, 18.dp)
-                        T(c.time, ts(13, 22, 400, 0f, Text2))
+                        T(c.time, ts(13, 24, 400, 0f, Text2))
                     }
                 }
-                Column(Modifier.padding(top = 2.dp, end = if (c.badge != null) 34.dp else 0.dp).height(40.dp)) {
-                    if (c.sender != null) T(c.sender, ts(14, 20, 400, .25f, Text1))
-                    T(c.text, ts(14, 20, 400, .25f, Text2), lines = if (c.sender != null) 1 else 2)
+                Column(Modifier.padding(top = 2.dp, end = if (c.badge != null) 34.dp else 0.dp)) {
+                    if (c.sender != null) T(c.sender, ts(16, 21, 400, .1f, Text1))
+                    T(c.text, ts(16, 21, 400, .1f, Text2))
                 }
             }
             if (c.badge != null) Box(
-                Modifier.align(Alignment.TopEnd).padding(top = 39.dp).defaultMinSize(22.dp).height(22.dp)
+                Modifier.align(Alignment.TopEnd).padding(top = 30.dp).defaultMinSize(22.dp).height(22.dp)
                     .clip(RoundedCornerShape(11.dp)).background(if (c.orange) Primary else Mute).padding(horizontal = 6.dp),
                 Alignment.Center
             ) { T(c.badge, ts(13, 18, 500, 0f, if (c.orange) Color.White else Surface)) }
@@ -374,7 +381,7 @@ private fun NavBar() {
         NavItem("Стена", false) { VIcon(BELL_O, Text2, 28.dp, evenOdd = true) }
         NavItem("Чаты", true) { VIcon(CHAT, Primary, 28.dp) }
         NavItem("Профиль", false) {
-            Box(Modifier.size(30.dp).clip(CircleShape).background(Brush.linearGradient(listOf(Color(0xFFFFB366), Color(0xFFF97B00)))), Alignment.Center) {
+            Box(Modifier.size(30.dp).clip(CircleShape).background(Brush.linearGradient(listOf(Color(0xFFC9A8FF), Color(0xFF8F5FE8)))), Alignment.Center) {
                 T("И", ts(14, 20, 500, .1f, Color.White))
             }
         }
