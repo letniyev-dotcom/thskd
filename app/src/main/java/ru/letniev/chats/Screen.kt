@@ -1,11 +1,10 @@
 package ru.letniev.chats
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -44,7 +43,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.exp
-import kotlin.math.sin
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -85,14 +83,14 @@ private fun loadFont(c: Context): FontFamily = try {
 private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, align: TextAlign? = null) =
     BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
-private val StickEasing = CubicBezierEasing(.3f, 0f, .2f, 1.12f)
 private const val BAR = 76      // высота строки с заголовком, dp
 private const val STORIES = 104  // высота очереди в развёрнутом виде, dp
 
 // состояние шапки: два положения (очередь развёрнута / свёрнута).
-// Палец сначала лишь слегка тянет шапку (резинка), после порога она сама доезжает до другого положения.
+// Шапка идёт за пальцем всё время: сначала с сопротивлением, дальше почти 1:1; после отпускания доезжает пружиной,
+// продолжая движение пальца (дальше трети пути или по броску), иначе возвращается назад.
 @Stable
-private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) {
+private class HeaderState(val maxPx: Float, private val dpu: Float, private val scope: CoroutineScope) {
     var collapsed by mutableFloatStateOf(0f)
     val p: Float get() = if (maxPx > 0f) (collapsed / maxPx).coerceIn(0f, 1f) else 0f
     var isCollapsed = false
@@ -100,35 +98,59 @@ private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) {
     var pull = 0f
         private set
     private var job: Job? = null
-    private val threshold = maxPx * .16f
-    private val reach = maxPx * .25f
     private val busy get() = job?.isActive == true
+    private var cv = 0f        // скорость шапки, px/с
+    private var lastT = 0L
+    private val reach = 40f * dpu
+    private val k0 = .5f
+    private val stiffness = 311f   // критическое демпфирование, ~0.34 с
 
-    private fun rubber(x: Float) = reach * (1f - exp(-x / reach))
-    private fun show() { collapsed = if (isCollapsed) maxPx - rubber(pull) else rubber(pull) }
-
-    fun animateTo(t: Float, ms: Int = 420) {
-        job?.cancel()
-        job = scope.launch { animate(collapsed, t, animationSpec = tween(ms)) { v, _ -> collapsed = v } }
+    // сколько шапка прошла, когда палец протянул x: в начале наклон k0, дальше плавно до 1:1
+    private fun cOf(x: Float): Float {
+        val u = x / reach
+        val q = if (u <= 1f) reach * (u * u * u - u * u * u * u / 2f) else reach * .5f + (x - reach)
+        return k0 * x + (1f - k0) * q
     }
-    fun flip(to: Boolean) { isCollapsed = to; pull = 0f; animateTo(if (to) maxPx else 0f) }
+
+    private fun springTo(t: Float, v0: Float) {
+        job?.cancel()
+        job = scope.launch { animate(collapsed, t, v0, spring(1f, stiffness)) { v, _ -> collapsed = v.coerceIn(0f, maxPx) } }
+    }
+    fun flip(to: Boolean, minV: Float = 0f) {
+        val dir = if (to) 1f else -1f
+        isCollapsed = to; pull = 0f
+        springTo(if (to) maxPx else 0f, dir * maxOf(cv * dir, minV * dpu))
+    }
 
     // d > 0: тянем в сторону сворачивания. Возвращает, сколько движения забрала шапка (остальное уйдёт списку)
     fun drag(d: Float): Float {
         if (busy) return d
         val away = if (isCollapsed) -d else d
         if (pull == 0f && away <= 0f) return 0f
+        val prev = collapsed
+        val now = System.nanoTime()
         pull = (pull + away).coerceAtLeast(0f)
-        if (pull >= threshold) { flip(!isCollapsed); return d }
-        show()
+        if (cOf(pull) >= maxPx) { // дотянули пальцем до конца
+            isCollapsed = !isCollapsed; pull = 0f; collapsed = if (isCollapsed) maxPx else 0f; cv = 0f
+            return d
+        }
+        val c = cOf(pull)
+        collapsed = if (isCollapsed) maxPx - c else c
+        val dt = maxOf(4f, (now - lastT) / 1_000_000f) / 1000f
+        cv = cv * .5f + ((collapsed - prev) / dt) * .5f
+        lastT = now
         return d
     }
 
-    // палец отпущен: быстрый бросок доводит переход, иначе шапка возвращается назад
+    // палец отпущен: vy в px/с, вверх отрицательно
     fun release(vy: Float) {
-        if (busy) return
-        val flick = pull > 0f && ((!isCollapsed && vy < -700f) || (isCollapsed && vy > 700f))
-        if (flick) flip(!isCollapsed) else if (pull > 0f) { pull = 0f; animateTo(if (isCollapsed) maxPx else 0f, 260) }
+        if (busy || pull == 0f) return
+        if ((System.nanoTime() - lastT) / 1_000_000f > 90f) cv = 0f
+        val v = 600f * dpu
+        val flick = (!isCollapsed && vy < -v) || (isCollapsed && vy > v)
+        val back = (isCollapsed && vy < -v) || (!isCollapsed && vy > v)
+        if (!back && (flick || cOf(pull) > maxPx * .3f)) flip(!isCollapsed, if (flick) 500f else 0f)
+        else { pull = 0f; springTo(if (isCollapsed) maxPx else 0f, cv) }
     }
 }
 
@@ -146,7 +168,7 @@ fun ChatsScreen() {
     val ff = remember { loadFont(ctx) }
     val u = LocalDensity.current.density
     val scope = rememberCoroutineScope()
-    val hs = remember(u) { HeaderState(STORIES * u, scope) }
+    val hs = remember(u) { HeaderState(STORIES * u, u, scope) }
     val conn = remember(hs) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
@@ -186,8 +208,6 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
     val showHit by remember(hs) { derivedStateOf { hs.p > .9f } }
     val canScroll by remember(hs) { derivedStateOf { hs.p < .3f } }
     val drag = rememberDraggableState { d -> hs.drag(-d) }
-    val ease = { t: Float -> FastOutSlowInEasing.transform(t.coerceIn(0f, 1f)) }
-    val stick = { t: Float -> StickEasing.transform(t.coerceIn(0f, 1f)) }
     BoxWithConstraints(Modifier.fillMaxWidth().background(Surface).draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.release(v) })) {
         Column {
             Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
@@ -206,16 +226,15 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
             Tabs(tab, onTab)
         }
 
-        // подписи: не режутся рамкой, а уезжают вверх вместе с аватарками и быстро гаснут
+        // всё завязано на один прогресс p: шапка, вкладки, список, аватарки и подписи двигаются вместе
         Box(Modifier.offset(y = BAR.dp).fillMaxWidth().height(0.dp).wrapContentHeight(Alignment.Top, unbounded = true)) {
             queueChats.forEachIndexed { i, c ->
                 Column(
                     Modifier.padding(top = 64.dp).width(64.dp).graphicsLayer {
                         val p = hs.p
-                        val pi = (p * 1.5f - i * .08f).coerceIn(0f, 1f)
                         translationX = (16 + i * 72) * u - ss.value * (1 - p) - 4 * u
-                        translationY = -50f * u * ease((pi * 1.35f).coerceAtMost(1f))
-                        alpha = 1f - ease(p / .18f)
+                        translationY = -50f * u * p
+                        alpha = 1f - (p / .3f).coerceIn(0f, 1f)
                     },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -225,30 +244,28 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
             }
         }
 
-        // аватары: стопка из первых трёх; остальные заезжают под третью и выезжают из-под неё.
-        // Лёгкая «липкость»: в полёте аватарки чуть вытягиваются, у разворота слегка пружинят
+        // аватары летят по прямой в стопку из первых трёх; остальные по пути растворяются
         queueChats.forEachIndexed { i, c ->
             Box(
                 Modifier
                     .graphicsLayer {
                         val p = hs.p
-                        val pi = (p * 1.5f - i * .08f).coerceIn(0f, 1f)
-                        val xe = stick(pi)
-                        val ye = ease(pi * 1.35f)
-                        val x0 = (16 + i * 72) * u - ss.value * (1 - ease(pi))
+                        val x0 = (16 + i * 72) * u - ss.value * (1 - p)
                         val x1 = (12 + minOf(i, 2) * 16) * u
-                        translationX = x0 + (x1 - x0) * xe
-                        translationY = ((BAR + 4) + ((BAR - 46) - (BAR + 4)) * ye) * u
-                        val s = 1f - .5f * ease(pi)
-                        val mid = sin(pi * 3.1416f)
-                        scaleX = s * (1f + .10f * mid); scaleY = s * (1f - .06f * mid)
+                        translationX = x0 + (x1 - x0) * p
+                        translationY = ((BAR + 4) + ((BAR - 46) - (BAR + 4)) * p) * u
+                        val s = 1f - .5f * p
+                        scaleX = s; scaleY = s
                         transformOrigin = TransformOrigin(0f, 0f)
-                        // четвёртая и далее спрятаны под третьей; гаснут только в самом конце, чтобы не было каёмки
-                        alpha = if (i < 3) 1f else 1f - ((pi - .85f) / .15f).coerceIn(0f, 1f)
+                        alpha = if (i < 3) 1f else 1f - ((p - .1f) / .5f).coerceIn(0f, 1f)
                     }
                     .zIndex((n - i).toFloat())
                     .size(56.dp)
-                    .drawBehind { drawCircle(Surface, size.minDimension / 2 + 3.dp.toPx()) }
+                    .drawBehind {
+                        // кольцо цвета фона отделяет аватарки в стопке; в развёрнутом виде его нет
+                        val ra = ((hs.p - .6f) / .4f).coerceIn(0f, 1f)
+                        if (ra > 0f) drawCircle(Surface.copy(alpha = ra), size.minDimension / 2 + 3.dp.toPx())
+                    }
             ) { Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2)))) }
         }
 
@@ -259,7 +276,7 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
         // тап по стопке аватаров возвращает очередь
         if (showHit) Box(
             Modifier.size(84.dp, BAR.dp)
-                .clickable(remember { MutableInteractionSource() }, null) { hs.flip(false) }
+                .clickable(remember { MutableInteractionSource() }, null) { hs.flip(false, 300f) }
         )
     }
 }
