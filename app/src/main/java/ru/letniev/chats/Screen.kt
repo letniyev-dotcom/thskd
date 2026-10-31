@@ -15,6 +15,8 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -31,7 +33,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -43,6 +47,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -121,6 +126,8 @@ private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, 
     BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
 private const val STORIES = 112  // высота ряда очереди, dp
+private const val FADE = 32       // высота мягкого затухания под шапкой, dp
+private const val LIST_GAP = 6    // на сколько список заходит под затухание, dp
 private const val SHOWN = 3      // сколько человек из очереди показываем отдельно, остальные уходят в кружок «+N»
 
 // ───────── резинка вместо андроидовского оверскролла ─────────
@@ -228,6 +235,8 @@ fun ChatsScreen(dark: Boolean, onToggleTheme: () -> Unit) {
     val pal = mix(t)
     val toggle by rememberUpdatedState(onToggleTheme)
     val haptic = LocalHapticFeedback.current
+    var headerH by remember { mutableIntStateOf(0) }
+    var titleW by remember { mutableIntStateOf(0) }
 
     CompositionLocalProvider(LocalFF provides ff, LocalPal provides pal, LocalOverscrollConfiguration provides null) {
         Column(
@@ -237,11 +246,34 @@ fun ChatsScreen(dark: Boolean, onToggleTheme: () -> Unit) {
                 .nestedScroll(rubber)
                 .nestedScroll(hs)
         ) {
-            Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }, hs) { toggle() } }
             Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
                 LazyColumn(Modifier.fillMaxSize().graphicsLayer { translationY = rubber.offset }) {
+                    // место под шапку: следует за её высотой, пока очередь сворачивается
+                    item {
+                        Spacer(Modifier.fillMaxWidth().layout { _, c ->
+                            layout(c.maxWidth, (headerH - LIST_GAP.dp.roundToPx()).coerceAtLeast(0)) {}
+                        })
+                    }
                     items(list) { ChatRow(it) }
                     item { Spacer(Modifier.height(16.dp)) }
+                }
+                // шапка без плотной подложки и границы: полупрозрачный фейд, список мягко уходит под него
+                val sf = pal.surface
+                val fade = remember(sf) { (0..12).map { k -> val t = k / 12f; sf.copy(alpha = .98f * (1f - t * t * (3f - 2f * t))) } }
+                Box(
+                    Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                        .onSizeChanged { headerH = it.height }
+                        .drawBehind {
+                            val f = FADE.dp.toPx().coerceAtMost(size.height)
+                            val top = size.height - f
+                            drawRect(sf.copy(alpha = .98f), Offset.Zero, Size(size.width, top))
+                            drawRect(Brush.verticalGradient(fade, startY = top, endY = size.height), Offset(0f, top), Size(size.width, f))
+                        }
+                ) {
+                    Column {
+                        Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }, hs, { titleW }, { titleW = it }) { toggle() } }
+                        Spacer(Modifier.height(FADE.dp))
+                    }
                 }
             }
             NavBar()
@@ -261,70 +293,79 @@ private fun IconBox(onClick: (() -> Unit)? = null, content: @Composable () -> Un
 // шапка: архив слева, заголовок по центру, поиск справа, ряд очереди и вкладки.
 // Очередь сворачивается вместе с прокруткой списка; шапку можно двигать и пальцем за неё саму.
 @Composable
-private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState, onArchive: () -> Unit) {
+private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState, titleW: () -> Int, onTitle: (Int) -> Unit, onArchive: () -> Unit) {
     val pal = LocalPal.current
     val drag = rememberDraggableState { d -> hs.by(-d) }
     Column(Modifier.fillMaxWidth().draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.settle(v) })) {
         Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
             Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { IconBox(onArchive) { VIcon(ARCHIVE, pal.headerGray, 28.dp, stroke = 1.7f) } }
             Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, pal.primary, 28.dp, stroke = 2f) } }
-            Box(Modifier.align(Alignment.Center)) { T("Общение", ts(20, 28, 500, 0f, pal.title)) }
+            Box(Modifier.align(Alignment.Center).onSizeChanged { onTitle(it.width) }.graphicsLayer { translationX = 33f * density * hs.p }) { T("Общение", ts(20, 28, 500, 0f, pal.title)) }
         }
-        Stories(hs)
+        Stories(hs, titleW)
         Tabs(tab, onTab)
     }
 }
 
-// очередь «можно взять»: как у Telegram, мало и крупно. Первые трое отдельно, остальные одним кружком «+N».
-// Четыре колонки поровну на всю ширину, листать нечего. Кольцо у тех, кто ждёт дольше всех.
+// очередь «можно взять»: все кружки без колец, листаются вбок.
+// Сворачивание как у Telegram: подписи гаснут, кружки уменьшаются и стягиваются стопкой слева от заголовка.
+// Ничего не обрезается: кружки рисуются поверх, обрезки у ряда нет.
 @Composable
-private fun Stories(hs: HeaderState) {
-    val pal = LocalPal.current
-    val rest = queueChats.drop(SHOWN)
-    val mins = rest.mapNotNull { it.time.filter { ch -> ch.isDigit() }.toIntOrNull() }
-    Box(
-        Modifier.fillMaxWidth()
-            .layout { m, c ->
-                val h = (hs.maxPx - hs.collapsed).roundToInt().coerceAtLeast(0)
-                val pl = m.measure(c.copy(minHeight = 0, maxHeight = Constraints.Infinity))
-                layout(pl.width, h) { pl.place(0, 0) }
-            }
-            .clipToBounds()
+private fun Stories(hs: HeaderState, titleW: () -> Int) {
+    val d = LocalDensity.current
+    BoxWithConstraints(
+        Modifier.fillMaxWidth().layout { m, c ->
+            val h = (hs.maxPx - hs.collapsed).roundToInt().coerceAtLeast(0)
+            val pl = m.measure(c.copy(minHeight = 0, maxHeight = Constraints.Infinity))
+            layout(pl.width, h) { pl.place(0, 0) }
+        }
     ) {
-        Row(
-            Modifier.fillMaxWidth().height(STORIES.dp).padding(horizontal = 8.dp)
-                .graphicsLayer {
-                    translationY = -hs.collapsed * .35f
-                    alpha = (1f - hs.p * 1.25f).coerceIn(0f, 1f)
-                    val s = 1f - .15f * hs.p
-                    scaleX = s; scaleY = s
-                }
-        ) {
-            queueChats.take(SHOWN).forEachIndexed { i, c ->
-                StoryItem(c.name, c.time, if (i < 2) pal.primary else null, if (i < 2) pal.primary else pal.text2) {
-                    Avatar(c.init, 58, 21, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
-                }
-            }
-            if (rest.isNotEmpty()) StoryItem("Ещё", "${mins.minOrNull()}–${mins.maxOrNull()} мин", pal.mute, pal.text2) {
-                Box(Modifier.size(58.dp).clip(CircleShape).background(pal.primary.copy(alpha = .13f)), Alignment.Center) {
-                    T("+${rest.size}", ts(20, 24, 500, 0f, pal.primary))
-                }
-            }
+        val w = with(d) { maxWidth.toPx() }
+        val itemW = w / 4.4f
+        val pad = 12f * d.density
+        val maxSx = maxOf(0f, pad * 2 + itemW * queueChats.size - w)
+        var sx by remember { mutableFloatStateOf(0f) }
+        val state = rememberScrollableState { dd -> val old = sx; sx = (sx - dd).coerceIn(0f, maxSx); old - sx }
+        val canScroll by remember { derivedStateOf { hs.collapsed < 1f } }
+        Box(Modifier.fillMaxWidth().height(STORIES.dp).scrollable(state, Orientation.Horizontal, enabled = canScroll)) {
+            queueChats.forEachIndexed { i, c -> StoryItem(i, c, hs, { sx }, itemW, pad, w, titleW) }
         }
     }
 }
 
 @Composable
-private fun RowScope.StoryItem(name: String, time: String, ring: Color?, timeColor: Color, avatar: @Composable () -> Unit) {
+private fun StoryItem(i: Int, c: Chat, hs: HeaderState, sx: () -> Float, itemW: Float, pad: Float, w: Float, titleW: () -> Int) {
     val pal = LocalPal.current
-    Column(Modifier.weight(1f).padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    val d = LocalDensity.current
+    val left = pad + itemW * i
+    val small = 26f / 64f
+    Column(
+        Modifier.offset { IntOffset(left.roundToInt(), 0) }.width(with(d) { itemW.toDp() }).zIndex(20f - i).padding(top = 4.dp)
+            .graphicsLayer {
+                val p = hs.p
+                val s = sx()
+                val stackW = 58f * density; val gap = 8f * density
+                val gl = w / 2 - (stackW + gap + titleW()) / 2
+                val tgt = gl + 13f * density + 16f * density * minOf(i, 2)
+                val cur = left + itemW / 2 - s
+                translationX = -s + (tgt - cur) * p
+                translationY = -68f * density * p
+                alpha = if (i < 3) 1f else (1f - (p - .1f) * 2f).coerceIn(0f, 1f)
+            },
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Box(
-            Modifier.size(68.dp).then(if (ring != null) Modifier.border(2.dp, ring, CircleShape) else Modifier).padding(5.dp),
-            Alignment.Center
-        ) { avatar() }
-        Spacer(Modifier.height(6.dp))
-        T(name, ts(14, 18, 500, 0f, pal.text1))
-        T(time, ts(13, 16, 500, 0f, timeColor))
+            Modifier.graphicsLayer { val k = 1f - (1f - small) * hs.p; scaleX = k; scaleY = k }
+                .drawBehind {
+                    val p = hs.p
+                    if (p > 0f) drawCircle(pal.surface, size.minDimension / 2 + p * 2.dp.toPx() / (1f - (1f - small) * p))
+                }
+        ) { Avatar(c.init, 64, 23, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2)))) }
+        Column(Modifier.graphicsLayer { alpha = (1f - hs.p * 3f).coerceIn(0f, 1f) }, horizontalAlignment = Alignment.CenterHorizontally) {
+            Spacer(Modifier.height(6.dp))
+            T(c.name, ts(14, 18, 500, 0f, pal.text1))
+            T(c.time, ts(13, 16, 500, 0f, if (i < 2) pal.primary else pal.text2))
+        }
     }
 }
 
@@ -336,35 +377,37 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
     val ws = remember { mutableStateListOf(0f, 0f, 0f) }
     val x by animateFloatAsState(xs[sel], tween(320), label = "x")
     val w by animateFloatAsState(ws[sel], tween(320), label = "w")
-    Box(Modifier.padding(top = 8.dp).fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState())) {
-      Box(Modifier.padding(horizontal = 10.dp).height(48.dp)) {
-        // пилюля выбранной папки: едет под текстом от вкладки к вкладке
-        Box(
-            Modifier.offset { IntOffset(x.roundToInt(), 0) }.align(Alignment.CenterStart)
-                .width(with(LocalDensity.current) { w.toDp() }).height(34.dp)
-                .clip(RoundedCornerShape(17.dp)).background(pal.primary.copy(alpha = .13f))
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            names.forEachIndexed { i, n ->
-                val on = i == sel
-                val col by animateColorAsState(if (on) pal.primary else pal.text2, label = "c")
-                Row(
-                    Modifier.height(48.dp)
-                        .onGloballyPositioned { xs[i] = it.positionInParent().x; ws[i] = it.size.width.toFloat() }
-                        .clickable(remember { MutableInteractionSource() }, null) { onSel(i) }
-                        .padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
-                ) {
-                    T(n, ts(16, 24, 500, .1f, col))
-                    if (i == 0) Box(
-                        Modifier.defaultMinSize(20.dp).height(20.dp).clip(RoundedCornerShape(10.dp))
-                            .background(if (on) pal.primary else pal.mute).padding(horizontal = 6.dp),
-                        Alignment.Center
-                    ) { T(chats.count { it.badge != null }.toString(), ts(12, 16, 500, 0f, if (on) pal.onPrimary else pal.surface)) }
+    // островок: едва заметная подложка, выбранная вкладка чуть ярче
+    Box(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp), Alignment.Center) {
+        val island = lerpColor(pal.surface, pal.text1, .10f)
+        Box(Modifier.clip(RoundedCornerShape(21.dp)).background(island).padding(3.dp)) {
+            Box(
+                Modifier.offset { IntOffset(x.roundToInt(), 0) }.align(Alignment.CenterStart)
+                    .width(with(LocalDensity.current) { w.toDp() }).height(36.dp)
+                    .clip(RoundedCornerShape(18.dp)).background(lerpColor(island, pal.primary, .26f))
+            )
+            Row {
+                names.forEachIndexed { i, n ->
+                    val on = i == sel
+                    val col by animateColorAsState(if (on) pal.primary else pal.text2, label = "c")
+                    Row(
+                        Modifier.height(36.dp)
+                            .onGloballyPositioned { xs[i] = it.positionInParent().x; ws[i] = it.size.width.toFloat() }
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable(remember { MutableInteractionSource() }, null) { onSel(i) }
+                            .padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        T(n, ts(15, 22, 500, .1f, col))
+                        if (i == 0) Box(
+                            Modifier.defaultMinSize(18.dp).height(18.dp).clip(RoundedCornerShape(9.dp))
+                                .background(if (on) pal.primary else pal.mute).padding(horizontal = 5.dp),
+                            Alignment.Center
+                        ) { T(chats.count { it.badge != null }.toString(), ts(11, 15, 500, 0f, if (on) pal.onPrimary else pal.surface)) }
+                    }
                 }
             }
         }
-      }
     }
 }
 
@@ -381,17 +424,16 @@ private fun ChatRow(c: Chat) {
     val pal = LocalPal.current
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
-    // как в iOS: аватарка 62, текст с 80dp, тонкий разделитель от начала текста до правого края
+    // три строки: имя, ниже до двух строк текста (или отправитель и одна строка), без разделителей
     Row(
-        Modifier.fillMaxWidth().height(78.dp).background(if (pressed) pal.primary.copy(alpha = .09f) else Color.Transparent)
-            .drawBehind { drawLine(pal.divider, Offset(80.dp.toPx(), size.height), Offset(size.width, size.height), strokeWidth = .5.dp.toPx()) }
+        Modifier.fillMaxWidth().height(84.dp).background(if (pressed) pal.primary.copy(alpha = .09f) else Color.Transparent)
             .clickable(src, null) {}.padding(start = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Box(Modifier.padding(top = 8.dp).size(62.dp)) {
+        Box(Modifier.padding(top = 11.dp).size(62.dp)) {
             Avatar(c.init, 62, 22, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
         }
-        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 6.dp, end = 12.dp)) {
+        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 9.dp, end = 12.dp)) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f), Arrangement.spacedBy(6.dp), Alignment.CenterVertically) {
@@ -413,7 +455,7 @@ private fun ChatRow(c: Chat) {
                 }
             }
             if (c.badge != null) Box(
-                Modifier.align(Alignment.TopEnd).padding(top = 35.dp).defaultMinSize(22.dp).height(22.dp)
+                Modifier.align(Alignment.TopEnd).padding(top = 46.dp).defaultMinSize(22.dp).height(22.dp)
                     .clip(RoundedCornerShape(11.dp)).background(if (c.orange) pal.primary else pal.mute).padding(horizontal = 6.dp),
                 Alignment.Center
             ) { T(c.badge, ts(13, 18, 500, 0f, if (c.orange) pal.onPrimary else pal.surface)) }

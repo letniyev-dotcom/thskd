@@ -7,7 +7,7 @@ class Chat(
 )
 
 val chats = listOf(
-    Chat("Марина", "М", 0xFFFF8A65, 0xFFC2185B, "Договорились, завтра в 18:00 созвонимся", "9:41", "https://randomuser.me/api/portraits/women/44.jpg", check = true),
+    Chat("Марина", "М", 0xFFFF8A65, 0xFFC2185B, "Договорились, завтра в 18:00 созвонимся. Ссылку скину заранее, чтобы не искать", "9:41", "https://randomuser.me/api/portraits/women/44.jpg", check = true),
     Chat("Алексей", "А", 0xFF7986CB, 0xFF3F2B96, "Скинул тебе файлы на почту, глянь, пожалуйста", "9:12", "https://randomuser.me/api/portraits/men/32.jpg", badge = "2", orange = true, online = true),
     Chat("Соседи по дому", "С", 0xFFFFB74D, 0xFFE64A19, "Кто-нибудь знает, когда починят лифт?", "8:56", "https://picsum.photos/seed/house/200/200", sender = "Игорь", badge = "5", muted = true, shared = true)
 )
