@@ -107,6 +107,7 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
     private val k0 = .5f
     private val stiffness = 311f   // критическое демпфирование, ~0.34 с
     private val trigger = 80f * dpu  // сколько надо реально протянуть палец вниз, чтобы очередь раскрылась сама
+    private val step = 14f * dpu     // потолок засчитываемого движения пальца за одно событие при раскрытии
     private val rubber = 26f * dpu   // насколько шапка вообще сдвигается, пока тянешь до порога
 
     // сколько шапка прошла, когда палец протянул x: в начале наклон k0, дальше плавно до 1:1
@@ -133,7 +134,8 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
         if (pull == 0f && away <= 0f) return 0f
         val prev = collapsed
         val now = System.nanoTime()
-        pull = (pull + away).coerceAtLeast(0f)
+        // раскрытие: за одно событие засчитываем не больше step, поэтому резкий свайп не перепрыгивает порог, надо реально тянуть
+        pull = (pull + (if (isCollapsed) minOf(away, step) else away)).coerceAtLeast(0f)
         if (isCollapsed) {
             // раскрытие как в Telegram: сначала шапка почти не поддаётся (резинка), дотянул до порога — раскрывается сама
             if (pull >= trigger) { cv = 0f; flip(false, 450f); return d }
@@ -141,8 +143,8 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
             cv = 0f; lastT = now
             return d
         }
-        if (cOf(pull) >= maxPx) { // дотянули пальцем до конца
-            isCollapsed = !isCollapsed; pull = 0f; collapsed = if (isCollapsed) maxPx else 0f; cv = 0f
+        if (cOf(pull) >= maxPx) { // дотянули пальцем до конца: доезжаем пружиной, а не прыгаем
+            cv = 0f; flip(!isCollapsed, 0f)
             return d
         }
         val c = cOf(pull)
@@ -161,7 +163,7 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
         val v = 600f * dpu
         val flick = (!isCollapsed && vy < -v) || (isCollapsed && vy > v)
         val back = (isCollapsed && vy < -v) || (!isCollapsed && vy > v)
-        if (!back && (flick || cOf(pull) > maxPx * .3f)) flip(!isCollapsed, if (flick) 500f else 0f)
+        if (!back && ((flick && cOf(pull) > maxPx * .12f) || cOf(pull) > maxPx * .35f)) flip(!isCollapsed, if (flick) 500f else 0f)
         else { pull = 0f; springTo(if (isCollapsed) maxPx else 0f, cv) }
     }
 }
