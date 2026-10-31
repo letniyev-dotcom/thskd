@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -125,8 +126,16 @@ private fun loadFont(c: Context): FontFamily = try {
 private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, align: TextAlign? = null) =
     BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
-private const val STORIES = 116  // на сколько сворачивается блок «Можно взять» (его высота + отступ снизу), dp
-private const val BLOCK_H = 108   // полная высота самого блока, dp
+private const val STORIES = 130  // на сколько сворачивается блок «Можно взять» (его высота + отступ снизу), dp
+private const val BLOCK_H = 130   // полная высота самого блока, dp
+private const val IT = 76f        // шаг между кружками очереди, dp
+private const val AV = 56f        // диаметр кружка очереди, dp
+private const val SM = 26f / 56f  // масштаб кружка в свёрнутом виде (стопка рядом с заголовком)
+private const val RESIST = .5f    // насколько туго раскрывается блок: на 1 dp пальца 0.5 dp блока
+
+private fun smooth(t: Float): Float { val x = t.coerceIn(0f, 1f); return x * x * (3f - 2f * x) }
+// у каждого кружка свой лёгкий сдвиг по времени: стягиваются к заголовку не разом, а волной
+private fun stackE(p: Float, i: Int) = smooth(p * 1.15f - i * .03f)
 
 // ───────── резинка вместо андроидовского оверскролла ─────────
 // Тянешь за край: содержимое идёт за пальцем, но туго, и чем дальше, тем сильнее сопротивление.
@@ -178,28 +187,41 @@ private class Rubber(private val scope: CoroutineScope, u: Float, private val ho
 }
 
 // ───────── сворачивание очереди ─────────
-// Без хитростей: высота ряда очереди ровно следует за пальцем (1:1), без порогов и рывков.
-// Отпустил на полпути: пружиной доезжает до ближайшего положения (по броску: туда, куда бросил).
+// Сворачивание идёт за пальцем 1:1. Раскрытие тянется туго (RESIST): блок идёт за пальцем с сопротивлением,
+// а когда отпустил, сам плавно доезжает до конца (хватит пятой части пути или броска вниз).
+// Не дотянул: так же плавно возвращается свёрнутым.
 @Stable
 private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) : NestedScrollConnection {
     var collapsed by mutableFloatStateOf(0f)
     val p: Float get() = if (maxPx > 0f) (collapsed / maxPx).coerceIn(0f, 1f) else 0f
     private var job: Job? = null
+    private var rest = 0f   // в каком положении блок стоял до этого касания: 0 раскрыт, maxPx свёрнут
 
-    // d > 0 сворачивает, d < 0 раскрывает; возвращает, сколько реально сдвинулось
+    // d > 0 сворачивает, d < 0 раскрывает (туго); возвращает, сколько пальца реально израсходовано
     fun by(d: Float): Float {
         job?.cancel()
-        val n = (collapsed + d).coerceIn(0f, maxPx)
+        val k = if (d < 0f) RESIST else 1f
+        val n = (collapsed + d * k).coerceIn(0f, maxPx)
         val used = n - collapsed
         collapsed = n
-        return used
+        return used / k
     }
 
     fun settle(vy: Float) { // vy: скорость пальца, вверх отрицательно
-        if (collapsed <= 0f || collapsed >= maxPx) return
-        val target = when { vy < -700f -> maxPx; vy > 700f -> 0f; p > .5f -> maxPx; else -> 0f }
+        if (collapsed <= 0f) { rest = 0f; return }
+        if (collapsed >= maxPx) { rest = maxPx; return }
+        val open = when {
+            vy > 700f -> true
+            vy < -700f -> false
+            rest >= maxPx -> (1f - p) > .2f || vy > 350f   // был свёрнут: хватит небольшой протяжки
+            else -> !(p > .3f || vy < -350f)
+        }
+        val target = if (open) 0f else maxPx
+        rest = target
         job?.cancel()
-        job = scope.launch { animate(collapsed, target, -vy.coerceIn(-4000f, 4000f), spring(1f, 300f)) { x, _ -> collapsed = x.coerceIn(0f, maxPx) } }
+        job = scope.launch {
+            animate(collapsed, target, -vy.coerceIn(-3000f, 3000f) * .5f, spring(.9f, 180f)) { x, _ -> collapsed = x.coerceIn(0f, maxPx) }
+        }
     }
 
     override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
@@ -207,7 +229,7 @@ private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) :
         return if (dy < 0f && collapsed < maxPx) Offset(0f, -by(-dy)) else Offset.Zero
     }
 
-    // список уже у верха, палец тянет вниз дальше: раскрываем очередь
+    // список уже у верха, палец тянет вниз дальше: раскрываем очередь (с сопротивлением)
     override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
         val dy = available.y
         return if (source == NestedScrollSource.UserInput && dy > 0f && collapsed > 0f) Offset(0f, -by(-dy)) else Offset.Zero
@@ -242,7 +264,7 @@ fun ChatsScreen(dark: Boolean, onToggleTheme: () -> Unit) {
                 .nestedScroll(rubber)
                 .nestedScroll(hs)
         ) {
-            Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }, hs) { toggle() } }
+            Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }, hs, rubber) { toggle() } }
             Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
                 LazyColumn(Modifier.fillMaxSize().graphicsLayer { translationY = rubber.offset }) {
                     items(list) { ChatRow(it) }
@@ -263,31 +285,40 @@ private fun IconBox(onClick: (() -> Unit)? = null, content: @Composable () -> Un
     ) { content() }
 }
 
-// шапка: архив слева, заголовок по центру, поиск справа, ряд очереди и вкладки.
-// Очередь сворачивается вместе с прокруткой списка; шапку можно двигать и пальцем за неё саму.
+// шапка: архив слева, заголовок по центру, поиск справа, очередь «можно взять» и папки.
+// Очередь без контейнера: кружки лежат прямо на фоне. Они рисуются поверх шапки (оверлеем), поэтому при сворачивании
+// плавно стягиваются в стопку рядом с заголовком, как сторис в Telegram. Шапку можно двигать и пальцем за неё саму.
 @Composable
-private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState, onArchive: () -> Unit) {
-    val pal = LocalPal.current
-    val drag = rememberDraggableState { d -> hs.by(-d) }
-    Column(Modifier.fillMaxWidth().draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.settle(v) })) {
-        Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
-            Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { IconBox(onArchive) { VIcon(ARCHIVE, pal.headerGray, 28.dp, stroke = 1.7f) } }
-            Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, pal.primary, 28.dp, stroke = 2f) } }
-            Box(Modifier.align(Alignment.Center)) { T("Общение", ts(20, 28, 500, 0f, pal.title)) }
-        }
-        QueueBlock(hs)
-        Tabs(tab, onTab)
-    }
-}
-
-// блок «Можно взять» в шапке, до сортировки: карточка чуть другого цвета, внутри карусель кружков с именем и временем ожидания.
-// Сворачивается как обычная карточка: высота идёт за прокруткой, углы остаются скруглёнными, содержимое гаснет и слегка уезжает вверх.
-@Composable
-private fun QueueBlock(hs: HeaderState) {
+private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState, listRubber: Rubber, onArchive: () -> Unit) {
     val pal = LocalPal.current
     val u = LocalDensity.current.density
     val scope = rememberCoroutineScope()
-    val rubber = remember(u) { Rubber(scope, u, horizontal = true) }  // край карусели тянется резинкой
+    val hRubber = remember(u) { Rubber(scope, u, horizontal = true) }  // край ряда кружков тянется резинкой
+    val qs = rememberScrollState()
+    var hw by remember { mutableIntStateOf(0) }
+    var titleW by remember { mutableIntStateOf(0) }
+    val drag = rememberDraggableState { d -> hs.by(-d) }
+    Box(Modifier.fillMaxWidth().onSizeChanged { hw = it.width }) {
+        Column(Modifier.fillMaxWidth().draggable(drag, Orientation.Vertical, onDragStopped = { v -> hs.settle(v) })) {
+            Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
+                Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { IconBox(onArchive) { VIcon(ARCHIVE, pal.headerGray, 28.dp, stroke = 1.7f) } }
+                Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, pal.primary, 28.dp, stroke = 2f) } }
+                Box(
+                    Modifier.align(Alignment.Center).onSizeChanged { titleW = it.width }
+                        .graphicsLayer { translationX = 33f * u * smooth(hs.p) }  // уступает место стопке кружков
+                ) { T("Общение", ts(20, 28, 500, 0f, pal.title)) }
+            }
+            QueueBlock(hs, qs, hRubber)
+            Tabs(tab, onTab)
+        }
+        QueueOverlay(hs, qs, hRubber, listRubber, hw, titleW)
+    }
+}
+
+// место под очередь: заголовок и невидимая область для горизонтальной прокрутки. Высота идёт за прокруткой.
+@Composable
+private fun QueueBlock(hs: HeaderState, qs: ScrollState, rubber: Rubber) {
+    val pal = LocalPal.current
     Box(
         Modifier.fillMaxWidth().layout { m, c ->
             val h = (hs.maxPx - hs.collapsed).roundToInt().coerceAtLeast(0)
@@ -295,65 +326,81 @@ private fun QueueBlock(hs: HeaderState) {
             layout(pl.width, h) { pl.place(0, 0) }
         }
     ) {
-        Box(
-            Modifier.padding(horizontal = 6.dp).fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(lerpColor(pal.surface, pal.primary, .045f))
-                .layout { m, c ->
-                    val full = BLOCK_H.dp.roundToPx()
-                    val h = ((hs.maxPx - hs.collapsed) - 8.dp.toPx()).roundToInt().coerceIn(0, full)
-                    val pl = m.measure(c.copy(minHeight = full, maxHeight = full))
-                    layout(pl.width, h) { pl.place(0, 0) }
-                }
-        ) {
-            Column(Modifier.fillMaxSize().graphicsLayer {
-                alpha = (1f - hs.p * 1.7f).coerceIn(0f, 1f)
-                translationY = -hs.collapsed * .25f
-            }) {
-                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp).height(18.dp), Arrangement.Start, Alignment.CenterVertically) {
-                    T("Можно взять", ts(13, 18, 500, 0f, pal.text2))
-                }
-                Spacer(Modifier.height(2.dp))
-                Box(Modifier.fillMaxWidth().nestedScroll(rubber)) {
-                    Row(Modifier.horizontalScroll(rememberScrollState()).graphicsLayer { translationX = rubber.offset }.padding(horizontal = 6.dp)) {
-                        queueChats.forEachIndexed { i, c ->
-                            Column(Modifier.width(58.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Avatar(c.init, 44, 16, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
-                                Spacer(Modifier.height(3.dp))
-                                T(c.name, ts(12, 16, 500, 0f, pal.text1))
-                                T(c.time, ts(11, 14, 500, 0f, if (i < 2) pal.primary else pal.text2))
-                            }
-                        }
-                    }
-                }
+        Column(Modifier.fillMaxWidth().height(BLOCK_H.dp)) {
+            Row(
+                Modifier.fillMaxWidth().graphicsLayer {
+                    alpha = smooth(1f - hs.p * 1.7f)
+                    translationY = -hs.collapsed * .25f
+                }.padding(start = 16.dp, end = 16.dp, top = 6.dp).height(18.dp),
+                Arrangement.Start, Alignment.CenterVertically
+            ) { T("Можно взять", ts(13, 18, 500, 0f, pal.text2)) }
+            Box(Modifier.fillMaxWidth().height((BLOCK_H - 24).dp).nestedScroll(rubber).horizontalScroll(qs)) {
+                Spacer(Modifier.width((22f + IT * queueChats.size).dp).height((BLOCK_H - 24).dp))
             }
         }
     }
 }
 
+// кружки и подписи очереди. Положение каждого считается из прогресса сворачивания p:
+// развёрнуто: ряд с именем и временем, листается вбок; свёрнуто: стопка из трёх кружков слева от заголовка.
+@Composable
+private fun QueueOverlay(hs: HeaderState, qs: ScrollState, hR: Rubber, vR: Rubber, hw: Int, titleW: Int) {
+    val pal = LocalPal.current
+    val u = LocalDensity.current.density
+    Box(Modifier.fillMaxWidth()) {
+        queueChats.forEachIndexed { i, c ->
+            Column(
+                Modifier.width(IT.dp).graphicsLayer {
+                    val p = hs.p
+                    translationX = (11f + IT * i) * u - (qs.value - hR.offset) * (1f - p)
+                    translationY = (76f + 92f) * u - p * 18f * u + vR.offset * .6f
+                    alpha = smooth(1f - p * 2.4f)
+                },
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                T(c.name, ts(13, 16, 500, 0f, pal.text1), Modifier.fillMaxWidth(), align = TextAlign.Center)
+                T(c.time, ts(12, 14, 500, 0f, if (i < 2) pal.primary else pal.text2), Modifier.fillMaxWidth(), align = TextAlign.Center)
+            }
+        }
+        queueChats.forEachIndexed { i, c ->
+            Box(
+                Modifier.size(AV.dp).zIndex(20f - i)
+                    .graphicsLayer {
+                        val p = hs.p
+                        val e = stackE(p, i)
+                        val gl = hw / 2f - (66f * u + titleW) / 2f                    // левый край стопки
+                        val tx = gl + (13f + 16f * minOf(i, 2)) * u                   // центр кружка в стопке
+                        val bx = (11f + IT * i + IT / 2f) * u - (qs.value - hR.offset) * (1f - p)  // центр кружка в ряду
+                        val cy = (76f + 58f) * u + (44f - 134f) * u * e + vR.offset * .6f
+                        val op = if (i < 3) 1f else smooth(1f - (p - .05f) * 1.8f)
+                        var k = (1f - (1f - SM) * e) * (1f + minOf(vR.offset / u / 400f, .08f))
+                        if (i >= 3) k *= .6f + .4f * op
+                        translationX = bx + (tx - bx) * e - AV * u / 2f
+                        translationY = cy - AV * u / 2f
+                        scaleX = k; scaleY = k; alpha = op
+                    }
+                    .drawBehind {
+                        // кружок фоновой каёмкой отделяется от соседнего в стопке
+                        val e = stackE(hs.p, i)
+                        if (e > 0f) drawCircle(pal.surface, size.minDimension / 2f + 2f * u * e / (1f - (1f - SM) * e))
+                    }
+            ) { Avatar(c.init, AV.toInt(), 21, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2)))) }
+        }
+    }
+}
+
+// папки без плашки под выбранной: выбранная просто цветом, у «все» счётчик непрочитанных
 @Composable
 private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
     val pal = LocalPal.current
     val names = listOf("все", "непрочитанные", "общие")
-    val xs = remember { mutableStateListOf(0f, 0f, 0f) }
-    val ws = remember { mutableStateListOf(0f, 0f, 0f) }
-    val x by animateFloatAsState(xs[sel], tween(320), label = "x")
-    val w by animateFloatAsState(ws[sel], tween(320), label = "w")
     Box(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState())) {
-      Box(Modifier.padding(horizontal = 10.dp).height(48.dp)) {
-        // пилюля выбранной папки: едет под текстом от вкладки к вкладке
-        Box(
-            Modifier.offset { IntOffset(x.roundToInt(), 0) }.align(Alignment.CenterStart)
-                .width(with(LocalDensity.current) { w.toDp() }).height(34.dp)
-                .clip(RoundedCornerShape(17.dp)).background(pal.primary.copy(alpha = .13f))
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             names.forEachIndexed { i, n ->
                 val on = i == sel
                 val col by animateColorAsState(if (on) pal.primary else pal.text2, label = "c")
                 Row(
                     Modifier.height(48.dp)
-                        .onGloballyPositioned { xs[i] = it.positionInParent().x; ws[i] = it.size.width.toFloat() }
                         .clickable(remember { MutableInteractionSource() }, null) { onSel(i) }
                         .padding(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
@@ -367,7 +414,6 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
                 }
             }
         }
-      }
     }
 }
 
