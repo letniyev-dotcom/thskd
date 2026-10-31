@@ -106,6 +106,8 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
     private val reach = 40f * dpu
     private val k0 = .5f
     private val stiffness = 311f   // критическое демпфирование, ~0.34 с
+    private val trigger = 80f * dpu  // сколько надо реально протянуть палец вниз, чтобы очередь раскрылась сама
+    private val rubber = 26f * dpu   // насколько шапка вообще сдвигается, пока тянешь до порога
 
     // сколько шапка прошла, когда палец протянул x: в начале наклон k0, дальше плавно до 1:1
     private fun cOf(x: Float): Float {
@@ -132,6 +134,13 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
         val prev = collapsed
         val now = System.nanoTime()
         pull = (pull + away).coerceAtLeast(0f)
+        if (isCollapsed) {
+            // раскрытие как в Telegram: сначала шапка почти не поддаётся (резинка), дотянул до порога — раскрывается сама
+            if (pull >= trigger) { cv = 0f; flip(false, 450f); return d }
+            collapsed = maxPx - rubber * (1f - exp(-pull / (trigger * .5f)))
+            cv = 0f; lastT = now
+            return d
+        }
         if (cOf(pull) >= maxPx) { // дотянули пальцем до конца
             isCollapsed = !isCollapsed; pull = 0f; collapsed = if (isCollapsed) maxPx else 0f; cv = 0f
             return d
@@ -147,6 +156,7 @@ private class HeaderState(val maxPx: Float, private val dpu: Float, private val 
     // палец отпущен: vy в px/с, вверх отрицательно
     fun release(vy: Float) {
         if (busy || pull == 0f) return
+        if (isCollapsed) { pull = 0f; springTo(maxPx, 0f); return } // не дотянул до порога: резинка возвращается, лёгкий свайп не раскрывает
         if ((System.nanoTime() - lastT) / 1_000_000f > 90f) cv = 0f
         val v = 600f * dpu
         val flick = (!isCollapsed && vy < -v) || (isCollapsed && vy > v)
@@ -294,14 +304,14 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
     val x by animateFloatAsState(xs[sel], tween(320), label = "x")
     val w by animateFloatAsState(ws[sel], tween(320), label = "w")
     Box(Modifier.padding(top = 8.dp).fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState())) {
-      Box(Modifier.padding(horizontal = 16.dp).height(48.dp)) {
+      Box(Modifier.padding(horizontal = 10.dp).height(48.dp)) {
         // пилюля выбранной папки: едет под текстом от вкладки к вкладке
         Box(
             Modifier.offset { IntOffset(x.roundToInt(), 0) }.align(Alignment.CenterStart)
                 .width(with(LocalDensity.current) { w.toDp() }).height(34.dp)
                 .clip(RoundedCornerShape(17.dp)).background(Primary.copy(alpha = .13f))
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             names.forEachIndexed { i, n ->
                 val on = i == sel
                 val col by animateColorAsState(if (on) Primary else Text2, label = "c")
@@ -309,7 +319,7 @@ private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
                     Modifier.height(48.dp)
                         .onGloballyPositioned { xs[i] = it.positionInParent().x; ws[i] = it.size.width.toFloat() }
                         .clickable(remember { MutableInteractionSource() }, null) { onSel(i) }
-                        .padding(horizontal = 18.dp),
+                        .padding(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
                 ) {
                     T(n, ts(16, 24, 500, .1f, col))
@@ -337,37 +347,39 @@ private fun Avatar(init: String, size: Int, fs: Int, photo: String, brush: Brush
 private fun ChatRow(c: Chat) {
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
+    // как в iOS: аватарка 62, текст с 80dp, тонкий разделитель от начала текста до правого края
     Row(
-        Modifier.fillMaxWidth().height(92.dp).background(if (pressed) Primary.copy(alpha = .09f) else Color.Transparent)
-            .clickable(src, null) {}.padding(start = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp)
+        Modifier.fillMaxWidth().height(78.dp).background(if (pressed) Primary.copy(alpha = .09f) else Color.Transparent)
+            .drawBehind { drawLine(Divider, Offset(80.dp.toPx(), size.height), Offset(size.width, size.height), strokeWidth = .5.dp.toPx()) }
+            .clickable(src, null) {}.padding(start = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Box(Modifier.padding(top = 18.dp).size(56.dp)) {
-            Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
+        Box(Modifier.padding(top = 8.dp).size(62.dp)) {
+            Avatar(c.init, 62, 22, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
         }
-        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 22.dp, end = 16.dp)) {
+        Box(Modifier.weight(1f).fillMaxHeight().padding(top = 6.dp, end = 12.dp)) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f), Arrangement.spacedBy(6.dp), Alignment.CenterVertically) {
-                        T(c.name, ts(18, 24, 500, 0f, Text1), Modifier.weight(1f, fill = false))
+                        T(c.name, ts(17, 22, 500, 0f, Text1), Modifier.weight(1f, fill = false))
                         if (c.muted) Box {
-                            VIcon(SPEAKER, Mute, 18.dp)
-                            VIcon(CROSS, Mute, 18.dp, stroke = 1.6f)
+                            VIcon(SPEAKER, Mute, 17.dp)
+                            VIcon(CROSS, Mute, 17.dp, stroke = 1.6f)
                         }
                     }
                     Spacer(Modifier.width(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                         if (c.check) VIcon(CHECK, Primary, 18.dp)
-                        T(c.time, ts(13, 24, 400, 0f, Text2))
+                        T(c.time, ts(14, 22, 400, 0f, Text2))
                     }
                 }
-                Column(Modifier.padding(top = 2.dp, end = if (c.badge != null) 34.dp else 0.dp)) {
-                    if (c.sender != null) T(c.sender, ts(16, 21, 400, .1f, Text1))
-                    T(c.text, ts(16, 21, 400, .1f, Text2))
+                Column(Modifier.padding(end = if (c.badge != null) 36.dp else 0.dp)) {
+                    if (c.sender != null) T(c.sender, ts(15, 20, 400, 0f, Text1))
+                    T(c.text, ts(15, 20, 400, 0f, Text2), lines = if (c.sender != null) 1 else 2)
                 }
             }
             if (c.badge != null) Box(
-                Modifier.align(Alignment.TopEnd).padding(top = 30.dp).defaultMinSize(22.dp).height(22.dp)
+                Modifier.align(Alignment.TopEnd).padding(top = 35.dp).defaultMinSize(22.dp).height(22.dp)
                     .clip(RoundedCornerShape(11.dp)).background(if (c.orange) Primary else Mute).padding(horizontal = 6.dp),
                 Alignment.Center
             ) { T(c.badge, ts(13, 18, 500, 0f, if (c.orange) Color.White else Surface)) }
