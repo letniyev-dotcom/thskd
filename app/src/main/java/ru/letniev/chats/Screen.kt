@@ -1,12 +1,16 @@
 package ru.letniev.chats
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
@@ -20,6 +24,23 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.util.lerp
+import androidx.compose.ui.zIndex
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -60,14 +81,55 @@ private fun loadFont(c: Context): FontFamily = try {
 private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, align: TextAlign? = null) =
     BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
+private const val BAR = 76      // высота строки с заголовком, dp
+private const val STORIES = 104  // высота очереди в развёрнутом виде, dp
+
+// состояние сворачивания шапки: 0 = очередь развёрнута, maxPx = свёрнута в кластер у заголовка
+@Stable
+private class HeaderState(val maxPx: Float, private val scope: CoroutineScope) {
+    var collapsed by mutableFloatStateOf(0f)
+    val p: Float get() = if (maxPx > 0f) (collapsed / maxPx).coerceIn(0f, 1f) else 0f
+    private var job: Job? = null
+    fun stop() { job?.cancel(); job = null }
+    fun drag(d: Float): Float { stop(); val n = (collapsed + d).coerceIn(0f, maxPx); val used = n - collapsed; collapsed = n; return used }
+    fun animateTo(t: Float) { stop(); job = scope.launch { animate(collapsed, t, animationSpec = tween(240)) { v, _ -> collapsed = v } } }
+    fun settle() = animateTo(if (collapsed > maxPx / 2) maxPx else 0f)
+}
+
+private fun Modifier.storiesHeight(hs: HeaderState) = layout { m, c ->
+    val h = (hs.maxPx - hs.collapsed).roundToInt().coerceIn(c.minHeight, c.maxHeight)
+    val pl = m.measure(Constraints(c.minWidth, c.maxWidth, h, h))
+    layout(pl.width, pl.height) { pl.place(0, 0) }
+}
+
 @Composable
 fun ChatsScreen() {
     val ctx = LocalContext.current
     var tab by remember { mutableIntStateOf(0) }
-    val list = when (tab) { 1 -> chats.filter { it.badge != null }; 2 -> chats.filter { it.shared }; 3 -> queueChats; else -> chats }
+    val list = when (tab) { 1 -> chats.filter { it.badge != null }; 2 -> chats.filter { it.shared }; else -> chats }
     val ff = remember { loadFont(ctx) }
-    CompositionLocalProvider(LocalFF provides ff) { Column(Modifier.fillMaxSize().background(Surface)) {
-        Column(Modifier.statusBarsPadding()) { TopBar(); Tabs(tab) { tab = it } }
+    val u = LocalDensity.current.density
+    val scope = rememberCoroutineScope()
+    val hs = remember(u) { HeaderState(STORIES * u, scope) }
+    val conn = remember(hs) {
+        object : NestedScrollConnection {
+            // свайп вверх: сначала сворачиваем очередь, потом едет список
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val dy = available.y
+                if (dy < 0f && hs.collapsed < hs.maxPx) return Offset(0f, -hs.drag(-dy))
+                return Offset.Zero
+            }
+            // свайп вниз: список доезжает до верха, остаток разворачивает очередь
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                val dy = available.y
+                if (dy > 0f && hs.collapsed > 0f) return Offset(0f, -hs.drag(-dy))
+                return Offset.Zero
+            }
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity { hs.settle(); return Velocity.Zero }
+        }
+    }
+    CompositionLocalProvider(LocalFF provides ff) { Column(Modifier.fillMaxSize().background(Surface).nestedScroll(conn)) {
+        Column(Modifier.statusBarsPadding()) { Header(tab, { tab = it }, hs) }
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             items(list) { ChatRow(it) }
             item { Spacer(Modifier.height(16.dp)) }
@@ -80,28 +142,102 @@ fun ChatsScreen() {
 private fun IconBox(content: @Composable () -> Unit) =
     Box(Modifier.size(48.dp), Alignment.Center) { content() }
 
+// шапка: заголовок, очередь «сторис» и вкладки; очередь сворачивается в стопку аватаров рядом с заголовком
 @Composable
-private fun TopBar() {
-    Row(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconBox { VIcon(ARCHIVE, Primary, 28.dp, stroke = 1.5f) }
-        Row(Modifier.weight(1f), Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
-            T("Общение", ts(20, 28, 500, 0f, Color.Black))
-            Box(Modifier.width(1.dp).height(24.dp).background(Text1.copy(alpha = .14f)))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                val c = Color(0xFFB6AEAA)
-                VIcon(TG, c, 24.dp, 20.dp, vx = 3.5f, vy = 6f, vw = 15f, vh = 13f)
-                T("ТГ", ts(20, 28, 500, 0f, c))
+private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState) {
+    val u = LocalDensity.current.density
+    val ss = rememberScrollState()
+    var tw by remember { mutableFloatStateOf(0f) }
+    val n = queueChats.size
+    val showHit by remember(hs) { derivedStateOf { hs.p > .9f } }
+    val canScroll by remember(hs) { derivedStateOf { hs.p < .3f } }
+    val drag = rememberDraggableState { d -> hs.drag(-d) }
+    BoxWithConstraints(Modifier.fillMaxWidth().background(Surface).draggable(drag, Orientation.Vertical, onDragStopped = { hs.settle() })) {
+        val w = constraints.maxWidth.toFloat()
+        val sw = 60f * u
+        val g = 8f * u
+        val gl = { w / 2 - (sw + g + tw) / 2 }   // левый край стопки аватаров в свёрнутом виде
+
+        Column {
+            Box(Modifier.fillMaxWidth().padding(top = 12.dp).height(64.dp)) {
+                Box(Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) { IconBox { VIcon(ARCHIVE, Primary, 28.dp, stroke = 1.5f) } }
+                Box(Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) { IconBox { VIcon(SEARCH, Primary, 28.dp, evenOdd = true) } }
+                Row(
+                    Modifier.align(Alignment.CenterStart)
+                        .offset { IntOffset(lerp((w - tw) / 2, gl() + sw + g, hs.p).roundToInt(), 0) }
+                        .onSizeChanged { tw = it.width.toFloat() },
+                    Arrangement.spacedBy(12.dp), Alignment.CenterVertically
+                ) {
+                    T("Общение", ts(20, 28, 500, 0f, Color.Black))
+                    Box(Modifier.width(1.dp).height(24.dp).background(Text1.copy(alpha = .14f)))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val c = Color(0xFFB6AEAA)
+                        VIcon(TG, c, 24.dp, 20.dp, vx = 3.5f, vy = 6f, vw = 15f, vh = 13f)
+                        T("ТГ", ts(20, 28, 500, 0f, c))
+                    }
+                }
+            }
+            Spacer(Modifier.fillMaxWidth().storiesHeight(hs))
+            Tabs(tab, onTab)
+        }
+
+        // подписи под аватарами (имя и время ожидания), гаснут при сворачивании
+        Box(Modifier.offset(y = BAR.dp).fillMaxWidth().storiesHeight(hs).clipToBounds()) {
+            queueChats.forEachIndexed { i, c ->
+                Column(
+                    Modifier.padding(top = 64.dp).width(64.dp).graphicsLayer {
+                        val p = hs.p
+                        translationX = (16 + i * 72) * u - ss.value * (1 - p) - 4 * u
+                        alpha = (1f - p * 3f).coerceAtLeast(0f)
+                    },
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    T(c.name, ts(12, 16, 500, 0f, Text1))
+                    T(c.time, ts(11, 16, 400, 0f, if (i < 2) Primary else Text2))
+                }
             }
         }
-        IconBox { VIcon(SEARCH, Primary, 28.dp, evenOdd = true) }
+
+        // аватары: из ряда превращаются в стопку из трёх у заголовка
+        queueChats.forEachIndexed { i, c ->
+            Box(
+                Modifier
+                    .graphicsLayer {
+                        val p = hs.p
+                        val pi = (p * 1.3f - i * .06f).coerceIn(0f, 1f)
+                        val x0 = (16 + i * 72) * u - ss.value * (1 - pi)
+                        val x1 = gl() + minOf(i, 2) * 16 * u
+                        translationX = x0 + (x1 - x0) * pi
+                        translationY = ((BAR + 4) + ((BAR - 46) - (BAR + 4)) * pi) * u
+                        val s = 1f - .5f * pi
+                        scaleX = s; scaleY = s
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        alpha = if (i < 3) 1f else 1f - ((p - .3f) / .4f).coerceIn(0f, 1f)
+                    }
+                    .zIndex((n - i).toFloat())
+                    .size(56.dp)
+                    .drawBehind { drawCircle(Surface, size.minDimension / 2 + 3.dp.toPx()) }
+            ) { Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2)))) }
+        }
+
+        // горизонтальная прокрутка очереди (только пока она развёрнута)
+        if (canScroll) Box(Modifier.offset(y = BAR.dp).fillMaxWidth().storiesHeight(hs).horizontalScroll(ss)) {
+            Spacer(Modifier.width((16 + n * 72 - 8 + 16).dp).height(1.dp))
+        }
+
+        // тап по стопке аватаров возвращает очередь
+        if (showHit) Box(
+            Modifier.offset { IntOffset(gl().roundToInt(), 0) }.size(60.dp, BAR.dp)
+                .clickable(remember { MutableInteractionSource() }, null) { hs.animateTo(0f) }
+        )
     }
 }
 
 @Composable
 private fun Tabs(sel: Int, onSel: (Int) -> Unit) {
-    val names = listOf("все", "непрочитанные", "общие", "можно взять")
-    val xs = remember { mutableStateListOf(0f, 0f, 0f, 0f) }
-    val ws = remember { mutableStateListOf(0f, 0f, 0f, 0f) }
+    val names = listOf("все", "непрочитанные", "общие")
+    val xs = remember { mutableStateListOf(0f, 0f, 0f) }
+    val ws = remember { mutableStateListOf(0f, 0f, 0f) }
     val x by animateFloatAsState(xs[sel], tween(320), label = "x")
     val w by animateFloatAsState(ws[sel], tween(320), label = "w")
     Box(Modifier.padding(top = 8.dp).fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState())) {
