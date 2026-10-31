@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -119,7 +120,8 @@ private fun loadFont(c: Context): FontFamily = try {
 private fun T(s: String, st: TextStyle, m: Modifier = Modifier, lines: Int = 1, align: TextAlign? = null) =
     BasicText(s, m, st.copy(textAlign = align ?: TextAlign.Unspecified, fontFamily = LocalFF.current), maxLines = lines, overflow = TextOverflow.Ellipsis)
 
-private const val STORIES = 104  // высота ряда очереди, dp
+private const val STORIES = 112  // высота ряда очереди, dp
+private const val SHOWN = 3      // сколько человек из очереди показываем отдельно, остальные уходят в кружок «+N»
 
 // ───────── резинка вместо андроидовского оверскролла ─────────
 // Тянешь за край: содержимое идёт за пальцем, но туго, и чем дальше, тем сильнее сопротивление.
@@ -273,13 +275,13 @@ private fun Header(tab: Int, onTab: (Int) -> Unit, hs: HeaderState, onArchive: (
     }
 }
 
-// очередь «можно взять»: аватарка, имя, время ожидания; по горизонтали с резинкой на краях
+// очередь «можно взять»: как у Telegram, мало и крупно. Первые трое отдельно, остальные одним кружком «+N».
+// Четыре колонки поровну на всю ширину, листать нечего. Кольцо у тех, кто ждёт дольше всех.
 @Composable
 private fun Stories(hs: HeaderState) {
     val pal = LocalPal.current
-    val u = LocalDensity.current.density
-    val scope = rememberCoroutineScope()
-    val rubber = remember(u) { Rubber(scope, u, horizontal = true) }
+    val rest = queueChats.drop(SHOWN)
+    val mins = rest.mapNotNull { it.time.filter { ch -> ch.isDigit() }.toIntOrNull() }
     Box(
         Modifier.fillMaxWidth()
             .layout { m, c ->
@@ -287,27 +289,42 @@ private fun Stories(hs: HeaderState) {
                 val pl = m.measure(c.copy(minHeight = 0, maxHeight = Constraints.Infinity))
                 layout(pl.width, h) { pl.place(0, 0) }
             }
-            .clipToBounds().nestedScroll(rubber)
+            .clipToBounds()
     ) {
         Row(
-            Modifier.fillMaxWidth().height(STORIES.dp)
+            Modifier.fillMaxWidth().height(STORIES.dp).padding(horizontal = 8.dp)
                 .graphicsLayer {
-                    translationX = rubber.offset
                     translationY = -hs.collapsed * .35f
                     alpha = (1f - hs.p * 1.25f).coerceIn(0f, 1f)
+                    val s = 1f - .15f * hs.p
+                    scaleX = s; scaleY = s
                 }
-                .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            queueChats.forEachIndexed { i, c ->
-                Column(Modifier.width(64.dp).padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Avatar(c.init, 56, 20, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
-                    Spacer(Modifier.height(6.dp))
-                    T(c.name, ts(13, 16, 500, 0f, pal.text1))
-                    T(c.time, ts(12, 16, 500, 0f, if (i < 2) pal.primary else pal.text2))
+            queueChats.take(SHOWN).forEachIndexed { i, c ->
+                StoryItem(c.name, c.time, if (i < 2) pal.primary else null, if (i < 2) pal.primary else pal.text2) {
+                    Avatar(c.init, 58, 21, c.photo, Brush.linearGradient(listOf(Color(c.g1), Color(c.g2))))
+                }
+            }
+            if (rest.isNotEmpty()) StoryItem("Ещё", "${mins.minOrNull()}–${mins.maxOrNull()} мин", pal.mute, pal.text2) {
+                Box(Modifier.size(58.dp).clip(CircleShape).background(pal.primary.copy(alpha = .13f)), Alignment.Center) {
+                    T("+${rest.size}", ts(20, 24, 500, 0f, pal.primary))
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RowScope.StoryItem(name: String, time: String, ring: Color?, timeColor: Color, avatar: @Composable () -> Unit) {
+    val pal = LocalPal.current
+    Column(Modifier.weight(1f).padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier.size(68.dp).then(if (ring != null) Modifier.border(2.dp, ring, CircleShape) else Modifier).padding(5.dp),
+            Alignment.Center
+        ) { avatar() }
+        Spacer(Modifier.height(6.dp))
+        T(name, ts(14, 18, 500, 0f, pal.text1))
+        T(time, ts(13, 16, 500, 0f, timeColor))
     }
 }
 
